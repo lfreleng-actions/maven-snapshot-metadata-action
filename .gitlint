@@ -1,102 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# All these sections are optional, edit this file as you like.
 [general]
-# Ignore certain rules, you can reference them by their id or by their full
-# name
-# ignore=title-trailing-punctuation, T3
-
-# verbosity should be a value between 1 and 3, the command line -v flags take
-# precedence over this
-# verbosity = 2
-
-# By default gitlint will ignore merge commits. Set to 'false' to disable.
-# ignore-merge-commits=true
-
-# By default gitlint will ignore fixup commits. Set to 'false' to disable.
-# ignore-fixup-commits=true
-
-# By default gitlint will ignore squash commits. Set to 'false' to disable.
-# ignore-squash-commits=true
-
-# Enable debug mode (prints more output). Disabled by default.
-# debug=true
-
-# Set the extra-path where gitlint will search for user defined rules
-# See http://jorisroovers.github.io/gitlint/user_defined_rules for details
-# extra-path=examples/
-
-# Opt in to 'search' regex semantics ahead of gitlint making them the
-# default, which also silences the deprecation warning.
-#
-# In v0.19.1 this governs the ignore-by-body and ignore-body-lines
-# rules. Behaviour of both is unchanged: ignore-by-body is anchored,
-# and ignore-body-lines already matches anywhere in the line.
-# title-match-regex is unaffected either way, see below.
 regex-style-search=true
-
 contrib=contrib-title-conventional-commits,contrib-body-requires-signed-off-by
 
-# Subject line limit from the seven rules of a great commit message.
-# Overrides the gitlint default of 72.
 [title-max-length]
 line-length=50
 
-# Require a capital letter both at the start of the title and at the
-# start of the description after the colon. The type itself is already
-# validated by [contrib-title-conventional-commits]; this rule
-# deliberately does not repeat the type list, so adding a type there
-# needs no change here.
-#
-# The optional '!' keeps the conventional-commits breaking-change
-# marker valid, e.g. 'Feat!: Add API' and 'Feat(api)!: Add API', which
-# CT1 accepts and this rule must not narrow.
-#
-# The leading anchor is required because title-match-regex calls
-# search() unconditionally in gitlint v0.19.1, so an unanchored
-# pattern would match anywhere in the title and never fail. This does
-# not depend on regex-style-search above: the rule behaves identically
-# with that option on or off, so removing it would not make this
-# pattern safe without the anchor.
-#
-# Merge, revert, fixup and squash commits are exempt via the
-# ignore-*-commits defaults, so generated subjects are unaffected.
 [title-match-regex]
 regex=^[A-Z][a-zA-Z]*(\([^)]+\))?!?: [A-Z]
 
-# Body wrap limit from the same source. Overrides the gitlint default
-# of 80. Lines containing URLs are exempted by [ignore-body-lines];
-# over-long trailers are handled by [ignore-by-body] below.
 [body-max-line-length]
 line-length=72
 
 [contrib-title-conventional-commits]
 types=Fix,Feat,Chore,Docs,Style,Refactor,Perf,Test,Revert,CI,Build
 
-# A DCO trailer cannot be wrapped, and contrib-body-requires-signed-off-by
-# makes one mandatory, so a long identity would leave an author unable to
-# satisfy both rules. The pre-commit.ci sign-off is already 74 characters.
-#
-# This waives B1 for commits carrying such a trailer. [ignore-body-lines]
-# cannot be used here: it removes matching lines before any rule runs, so
-# exempting the sign-off that way would hide it from the signed-off-by
-# check and every commit would fail CC1 instead.
-#
-# Tradeoff: B1 is waived for the whole body of an affected commit, not just
-# the trailer line. Such commits are almost always machine-generated with a
-# one-line body.
-#
-# The lookahead matches the trailer name, then '.{73,}' requires the line to
-# exceed the 72-character limit. Expressing the length once, rather than as a
-# per-prefix quantifier, keeps the threshold exact for every name in the
-# group: 'Signed-off-by: ' and 'Co-authored-by: ' differ in length, so a
-# shared quantifier is off by one for one of them and would waive B1 for a
-# legal 72-character sign-off. Adding a name needs no recalculation.
 [ignore-by-body]
 regex=^(?=(Signed-off-by|Co-authored-by): ).{73,}
 ignore=B1
 
-# Disable linting on lines that have URLs on them
 [ignore-body-lines]
 regex=(.*)https?://(.*)
