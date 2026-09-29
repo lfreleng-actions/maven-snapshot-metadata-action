@@ -5,9 +5,6 @@
 paths:
   .github/workflows/testing.yaml:
     ignore:
-      # Deliberate test failures
-      - 'input "invalid_input" is not defined in action .+'
-      - 'missing input "input" which is required by action .+'
       # actionlint v1.17.0 rejects a bare '$/' (an action at the repository
       # root), which GitHub accepts and runs. The ignore also skips input and
       # output checks for those steps; drop it once a release with

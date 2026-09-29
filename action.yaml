@@ -1,53 +1,144 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+# maven-snapshot-metadata-action
+name: "📦 Maven SNAPSHOT Metadata"
+# yamllint disable-line rule:line-length
+description: "Seed and prune Maven SNAPSHOT metadata so Nexus buildNumbers keep counting"
+# A merge lane deploys SNAPSHOTs to a local file repository (the
+# m2repo) and publishes that tree afterwards. maven-deploy-plugin only
+# continues the published buildNumber sequence if the published
+# maven-metadata.xml is already in the m2repo, so 'fetch' seeds it
+# before the build and 'prune' removes whatever the build left
+# unchanged, which would otherwise overwrite newer metadata a sibling
+# build published meanwhile. The logic lives in src/snapshot_metadata
+# so that linters and tests can reach it.
 
 inputs:
-  input:
-    description: "Description of input"
+  # Required
+  mode:
+    description: "'fetch' before the build, 'prune' after it"
     required: true
 
+  # Optional; fetch only
+  nexus_server:
+    description: "Nexus server URL (https, or http for loopback)"
+    required: false
+    default: ""
+  repository_name:
+    description: "Nexus repository the SNAPSHOTs publish to"
+    required: false
+    default: ""
+  nexus_version:
+    description: "Repository URL layout: '2' or '3'"
+    required: false
+    default: "2"
+  nexus_username:
+    description: "Username for a repository that requires read access"
+    required: false
+    default: ""
+  nexus_password:
+    description: "Password for nexus_username"
+    required: false
+    default: ""
+  path_prefix:
+    description: "Project directory, relative to the workspace"
+    required: false
+    default: "."
+  pom_file:
+    description: "POM to read the reactor from, relative to path_prefix"
+    required: false
+    default: "pom.xml"
+  maven_args:
+    # yamllint disable-line rule:line-length
+    description: "Extra Maven arguments for reading the reactor, split on whitespace"
+    required: false
+    default: ""
+  help_plugin_version:
+    description: "maven-help-plugin version that reads the reactor"
+    required: false
+    default: "3.5.2"
+  fetch_attempts:
+    description: "Attempts per file on transient failures (1-10)"
+    required: false
+    default: "4"
+  retry_delay:
+    description: "Seconds before the first retry, doubling (0-60)"
+    required: false
+    default: "2"
+
+  # Optional; both modes
+  m2repo_path:
+    # yamllint disable-line rule:line-length
+    description: "Local deploy repository, within the workspace (maven-build-action's m2repo_path)"
+    required: false
+    default: ""
+
+  # Optional; prune only
+  baseline_path:
+    description: "Baseline written by fetch; defaults to its location"
+    required: false
+    default: ""
+
 outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  module_count:
+    description: "Reactor modules read by fetch"
+    value: ${{ steps.run.outputs.module_count }}
+  metadata_count:
+    description: "Metadata files fetch seeded"
+    value: ${{ steps.run.outputs.metadata_count }}
+  group_paths:
+    description: "Space-separated top-level group paths of the reactor"
+    value: ${{ steps.run.outputs.group_paths }}
+  baseline_path:
+    description: "Where fetch kept the pristine metadata"
+    value: ${{ steps.run.outputs.baseline_path }}
+  removed_count:
+    description: "Unchanged metadata files prune removed"
+    value: ${{ steps.run.outputs.removed_count }}
+  kept_count:
+    description: "Metadata files left in the m2repo to publish"
+    value: ${{ steps.run.outputs.kept_count }}
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: "SNAPSHOT metadata"
+      id: run
       shell: bash
       env:
-        INPUT_VALUE: ${{ inputs.input }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_NEXUS_SERVER: ${{ inputs.nexus_server }}
+        INPUT_REPOSITORY_NAME: ${{ inputs.repository_name }}
+        INPUT_NEXUS_VERSION: ${{ inputs.nexus_version }}
+        INPUT_NEXUS_USERNAME: ${{ inputs.nexus_username }}
+        INPUT_NEXUS_PASSWORD: ${{ inputs.nexus_password }}
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUT_POM_FILE: ${{ inputs.pom_file }}
+        INPUT_MAVEN_ARGS: ${{ inputs.maven_args }}
+        INPUT_HELP_PLUGIN_VERSION: ${{ inputs.help_plugin_version }}
+        INPUT_FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+        INPUT_RETRY_DELAY: ${{ inputs.retry_delay }}
+        INPUT_M2REPO_PATH: ${{ inputs.m2repo_path }}
+        INPUT_BASELINE_PATH: ${{ inputs.baseline_path }}
       run: |
-        # Friendly Name
-        input="$INPUT_VALUE"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
+        # SNAPSHOT metadata
+        set -euo pipefail
+        if ! command -v python3 > /dev/null; then
+          echo "::error::This action needs python3 on the runner"
           exit 1
         fi
-
-        # Write the output using the multiline heredoc format with a random
-        # delimiter so that an input containing newlines cannot inject
-        # additional keys into $GITHUB_OUTPUT (output-file injection). The
-        # delimiter is built from shell-builtin randomness (no external
-        # tools such as openssl/uuidgen, which are not guaranteed on
-        # self-hosted runners) and regenerated until it is provably absent
-        # from the value being emitted.
-        delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-        while [[ "$input" == *"$delimiter"* ]]; do
-          delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-        done
-        {
-          printf '%s<<%s\n' 'output' "$delimiter"
-          printf '%s\n' "$input"
-          printf '%s\n' "$delimiter"
-        } >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+        # Checked before the package is imported, since an older
+        # interpreter fails at import with a traceback, not an error
+        if ! python3 -E -s -c 'import sys; sys.exit(sys.version_info < (3, 9))'
+        then
+          echo "::error::This action needs Python 3.9 or newer;" \
+            "python3 is $(python3 -V 2>&1)"
+          exit 1
+        fi
+        # -E ignores PYTHON* variables and -s the user site directory,
+        # so neither the caller's environment nor the checkout can put
+        # other modules ahead of the standard library. main.py is run
+        # as a script, not with -m, for the reason it documents.
+        python3 -E -s "${GITHUB_ACTION_PATH}/src/main.py"

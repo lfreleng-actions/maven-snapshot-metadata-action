@@ -1,6 +1,6 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Action test/validation workflow
 name: "Test GitHub Action 🧪"
@@ -19,24 +19,31 @@ concurrency:
 
 permissions: {}
 
+env:
+  # test-maven-project, pinned so an upstream change cannot make this
+  # workflow appear broken. Three modules: parent, core and app.
+  FIXTURE_REF: "027f95ffb468eded8c73aa9c79f3a869f221775c"
+  FIXTURE_GROUP: "org.lfreleng.test"
+
 jobs:
-  ### Test the GitHub Action in this Repository ###
-  tests:
-    name: "Test local GitHub Action"
+  # The floor the action enforces and the runner's default, so the
+  # suite runs on the oldest interpreter it claims to support.
+  unit-tests:
+    name: "Unit tests (Python ${{ matrix.python }})"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
     steps:
-      # Load the egress allow-list out-of-band from the
-      # organisation's .github repository and publish it as
-      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
       # yamllint disable-line rule:line-length
-      - uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
-          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+          config: '@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
-      # Harden the runner with the just-loaded allow-list.
       - name: 'Harden runner (block)'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
@@ -50,41 +57,217 @@ jobs:
         with:
           persist-credentials: false
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
-        shell: bash
-        run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "Running local action: ${{ github.repository }}"
-        uses: $/
+      - name: "Set up Python"
+        id: python
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          input: "test input 💬"
+          python-version: ${{ matrix.python }}
 
-      - name: "Validated local action: ${{ github.repository }}"
+      # Standard library only, so the interpreter needs nothing
+      # installed. The suite runs a mock Nexus on a loopback port. The
+      # interpreter is named by path and its version asserted, so the
+      # job cannot quietly fall back to the runner's own python3.
+      - name: "Run unit tests"
         shell: bash
         env:
-          REPO: ${{ github.repository }}
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          WANT: ${{ matrix.python }}
+          PYTHONPATH: "src"
         run: |
-          # Local action validation
-          echo "Validated local action: $REPO"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          probe='import sys; print("%d.%d" % sys.version_info[:2])'
+          got="$("${PYTHON}" -c "${probe}")"
+          if [ "${got}" != "${WANT}" ]; then
+            echo "::error::ran Python ${got}, expected ${WANT}"
+            exit 1
+          fi
+          "${PYTHON}" -m unittest discover -s tests -t . -v
 
+  # Proves the premise the action exists for, on a real Maven deploy:
+  # with published metadata seeded at buildNumber 41, the deploy
+  # continues at 42, and prune drops the module the build left alone.
+  end-to-end:
+    name: "Fetch, deploy and prune (Maven ${{ matrix.maven }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the runner image's own; 4 parses long options with
+        # partial matching and differs in ways the checks depend on
+        maven: ["3.9", "4"]
+    env:
+      MAVEN4_VERSION: "4.0.0-rc-7"
+      # Pinned rather than fetched beside the tarball, where it would
+      # prove only that the download completed. Matches Apache's dist.
       # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
-        uses: $/
-        id: failure
-        continue-on-error: true
+      MAVEN4_SHA512: "17b886c0ffb7ec225e514afa8179b3143d855d196cfbb4607ece6272a9b4f51501a389438ab6841b393a4b1391a1b714f07f450daba1951f53f732b400338184"
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
-          invalid_input: "Some garbage"
+          config: '@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
-      # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Checkout fixture"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "lfreleng-actions/test-maven-project"
+          ref: ${{ env.FIXTURE_REF }}
+          path: "fixture"
+          persist-credentials: false
+
+      - name: "Set up Java"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: "Install Maven 4"
+        if: matrix.maven == '4'
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
+          set -euo pipefail
+          name="apache-maven-${MAVEN4_VERSION}"
+          base="https://repo1.maven.org/maven2/org/apache/maven/apache-maven"
+          archive="${RUNNER_TEMP}/${name}-bin.tar.gz"
+          curl -sfSL -o "${archive}" \
+            "${base}/${MAVEN4_VERSION}/${name}-bin.tar.gz"
+          echo "${MAVEN4_SHA512}  ${archive}" | sha512sum -c -
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/${name}/bin" >> "${GITHUB_PATH}"
+
+      - name: "Check the Maven under test"
+        shell: bash
+        env:
+          WANT: ${{ matrix.maven }}
+        run: |
+          set -euo pipefail
+          pattern='s/^Apache Maven \([0-9]*\)\.\([0-9]*\).*/\1.\2/p'
+          got="$(mvn -v | sed -n "${pattern}")"
+          case "${got}" in
+            "${WANT}"|"${WANT}".*) echo "Maven ${got}" ;;
+            *) echo "::error::running Maven ${got}, expected ${WANT}"; exit 1 ;;
+          esac
+
+      # Two modules already published at build 41. The deploy below
+      # rebuilds core only, so app's copy is the one prune must drop.
+      - name: "Start mock Nexus with published metadata"
+        id: mock
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/mock-nexus"
+          group="${FIXTURE_GROUP//.//}"
+          for module in core app; do
+            dir="${root}/${group}/test-maven-${module}/1.0.0-SNAPSHOT"
+            mkdir -p "${dir}"
+            cat > "${dir}/maven-metadata.xml" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <metadata modelVersion="1.1.0">
+            <groupId>${FIXTURE_GROUP}</groupId>
+            <artifactId>test-maven-${module}</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <versioning>
+              <snapshot>
+                <timestamp>20260901.000000</timestamp>
+                <buildNumber>41</buildNumber>
+              </snapshot>
+              <lastUpdated>20260901000000</lastUpdated>
+            </versioning>
+          </metadata>
+          EOF
+          done
+          url="$(tests/start-mock-nexus.sh "${root}" \
+            "${RUNNER_TEMP}/mock-nexus.port")"
+          echo "url=${url}" >> "${GITHUB_OUTPUT}"
+
+      - name: "Fetch published metadata"
+        id: fetch
+        uses: $/
+        with:
+          mode: "fetch"
+          nexus_server: ${{ steps.mock.outputs.url }}
+          repository_name: "snapshots"
+          path_prefix: "fixture"
+
+      - name: "Check fetch outputs"
+        shell: bash
+        env:
+          MODULES: ${{ steps.fetch.outputs.module_count }}
+          SEEDED: ${{ steps.fetch.outputs.metadata_count }}
+          GROUP_PATHS: ${{ steps.fetch.outputs.group_paths }}
+        run: |
+          set -euo pipefail
+          status=0
+          check() {
+            if [ "$2" != "$3" ]; then
+              echo "::error::$1 is '$2', expected '$3'"
+              status=1
+            fi
+          }
+          check module_count "${MODULES}" 4
+          check metadata_count "${SEEDED}" 2
+          check group_paths "${GROUP_PATHS}" org/lfreleng/test
+          exit "${status}"
+
+      # The same deploy maven-build-action performs, to the same path
+      - name: "Deploy core to the m2repo"
+        shell: bash
+        working-directory: "fixture"
+        run: |
+          set -euo pipefail
+          mvn -B --no-transfer-progress -pl core -am deploy -DskipTests \
+            "-DaltDeploymentRepository=snapshots::file://${GITHUB_WORKSPACE}/m2repo"
+
+      - name: "Prune unchanged metadata"
+        id: prune
+        uses: $/
+        with:
+          mode: "prune"
+
+      - name: "Assert buildNumber continuity and pruning"
+        shell: bash
+        env:
+          REMOVED: ${{ steps.prune.outputs.removed_count }}
+        run: |
+          set -euo pipefail
+          tests/assert-deploy.sh "${GITHUB_WORKSPACE}/m2repo" \
+            "${FIXTURE_GROUP}" test-maven-core test-maven-app 41
+          if [ "${REMOVED}" != "1" ]; then
+            echo "::error::removed_count ${REMOVED}, expected 1"
+            exit 1
+          fi
+
+      # Failure paths matter as much. prune must refuse a baseline that
+      # fetch did not write, rather than prune nothing and succeed.
+      - name: "Prune without a fetch baseline (should fail)"
+        id: no-baseline
+        continue-on-error: true
+        uses: $/
+        with:
+          mode: "prune"
+          baseline_path: ${{ runner.temp }}/no-such-baseline
+
+      - name: "Error if the step above did NOT fail"
+        if: steps.no-baseline.outcome == 'success'
+        shell: bash
+        run: |
+          echo "::error::prune without a baseline succeeded"
           exit 1
