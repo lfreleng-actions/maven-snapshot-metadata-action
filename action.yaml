@@ -47,9 +47,10 @@ inputs:
     required: false
     default: "."
   pom_file:
-    description: "POM to read the reactor from, relative to path_prefix"
+    # yamllint disable-line rule:line-length
+    description: "POM the deploy builds, relative to path_prefix; empty reads pom.xml"
     required: false
-    default: "pom.xml"
+    default: ""
   maven_args:
     # yamllint disable-line rule:line-length
     description: "Extra Maven arguments for reading the reactor, split on whitespace"
@@ -108,20 +109,20 @@ runs:
       id: run
       shell: bash
       env:
-        INPUT_MODE: ${{ inputs.mode }}
-        INPUT_NEXUS_SERVER: ${{ inputs.nexus_server }}
-        INPUT_REPOSITORY_NAME: ${{ inputs.repository_name }}
-        INPUT_NEXUS_VERSION: ${{ inputs.nexus_version }}
-        INPUT_NEXUS_USERNAME: ${{ inputs.nexus_username }}
-        INPUT_NEXUS_PASSWORD: ${{ inputs.nexus_password }}
-        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
-        INPUT_POM_FILE: ${{ inputs.pom_file }}
-        INPUT_MAVEN_ARGS: ${{ inputs.maven_args }}
-        INPUT_HELP_PLUGIN_VERSION: ${{ inputs.help_plugin_version }}
-        INPUT_FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
-        INPUT_RETRY_DELAY: ${{ inputs.retry_delay }}
-        INPUT_M2REPO_PATH: ${{ inputs.m2repo_path }}
-        INPUT_BASELINE_PATH: ${{ inputs.baseline_path }}
+        SNAPSHOT_METADATA_MODE: ${{ inputs.mode }}
+        SNAPSHOT_METADATA_NEXUS_SERVER: ${{ inputs.nexus_server }}
+        SNAPSHOT_METADATA_REPOSITORY_NAME: ${{ inputs.repository_name }}
+        SNAPSHOT_METADATA_NEXUS_VERSION: ${{ inputs.nexus_version }}
+        SNAPSHOT_METADATA_NEXUS_USERNAME: ${{ inputs.nexus_username }}
+        SNAPSHOT_METADATA_NEXUS_PASSWORD: ${{ inputs.nexus_password }}
+        SNAPSHOT_METADATA_PATH_PREFIX: ${{ inputs.path_prefix }}
+        SNAPSHOT_METADATA_POM_FILE: ${{ inputs.pom_file }}
+        SNAPSHOT_METADATA_MAVEN_ARGS: ${{ inputs.maven_args }}
+        SNAPSHOT_METADATA_HELP_PLUGIN_VERSION: ${{ inputs.help_plugin_version }}
+        SNAPSHOT_METADATA_FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+        SNAPSHOT_METADATA_RETRY_DELAY: ${{ inputs.retry_delay }}
+        SNAPSHOT_METADATA_M2REPO_PATH: ${{ inputs.m2repo_path }}
+        SNAPSHOT_METADATA_BASELINE_PATH: ${{ inputs.baseline_path }}
       run: |
         # SNAPSHOT metadata
         set -euo pipefail

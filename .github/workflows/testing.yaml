@@ -271,3 +271,14 @@ jobs:
         run: |
           echo "::error::prune without a baseline succeeded"
           exit 1
+
+      # Reactor discovery on this Maven, where the help plugin's own
+      # parameters and property-activated profiles meet a real build
+      - name: "Discover a reactor on real Maven"
+        shell: bash
+        env:
+          RUN_MAVEN_TESTS: "1"
+          PYTHONPATH: "src"
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_snapshot_metadata.TestRealMaven

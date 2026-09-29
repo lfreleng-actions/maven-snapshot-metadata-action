@@ -11,6 +11,8 @@ from pathlib import Path
 
 from snapshot_metadata import ActionError
 from snapshot_metadata.coordinates import (
+    ACTION_INPUT_PREFIX,
+    DEFAULT_POM,
     VERSION_RE,
     discover_coordinates,
     top_level_group_paths,
@@ -21,7 +23,12 @@ from snapshot_metadata.nexus import (
     basic_auth,
     repository_base_url,
 )
-from snapshot_metadata.repository import prune_metadata, seed_metadata
+from snapshot_metadata.repository import (
+    BASELINE_MARKER,
+    prune_metadata,
+    resolve_path,
+    seed_metadata,
+)
 from snapshot_metadata.workflow import (
     emit,
     emit_error,
@@ -32,7 +39,7 @@ from snapshot_metadata.workflow import (
 
 
 def _env(name: str, default: str = "") -> str:
-    return os.environ.get(f"INPUT_{name}", default).strip() or default
+    return os.environ.get(f"{ACTION_INPUT_PREFIX}{name}", default).strip() or default
 
 
 def _int_input(name: str, value: str, low: int, high: int) -> int:
@@ -42,8 +49,9 @@ def _int_input(name: str, value: str, low: int, high: int) -> int:
 
 
 def _within(path: Path, root: Path, name: str) -> Path:
-    resolved = path.resolve()
-    if resolved != root.resolve() and root.resolve() not in resolved.parents:
+    resolved = resolve_path(path)
+    resolved_root = resolve_path(root)
+    if resolved != resolved_root and resolved_root not in resolved.parents:
         raise ActionError(f"{name} must resolve within {root}")
     return resolved
 
@@ -67,7 +75,7 @@ def _m2repo() -> Path:
 
 
 def _fetcher() -> Fetcher:
-    password = os.environ.get("INPUT_NEXUS_PASSWORD", "")
+    password = os.environ.get(f"{ACTION_INPUT_PREFIX}NEXUS_PASSWORD", "")
     mask(password)
     return Fetcher(
         basic_auth(_env("NEXUS_USERNAME"), password),
@@ -78,6 +86,10 @@ def _fetcher() -> Fetcher:
 
 def run_fetch() -> None:
     """Entry point for mode 'fetch'."""
+    baseline = default_baseline()
+    # Withdrawn before anything that can fail, so a failed fetch never
+    # leaves an earlier fetch's baseline for an always() prune to accept
+    (baseline / BASELINE_MARKER).unlink(missing_ok=True)
     fetcher = _fetcher()
     base_url = repository_base_url(
         _env("NEXUS_SERVER"), _env("REPOSITORY_NAME"), _env("NEXUS_VERSION", "2")
@@ -86,8 +98,8 @@ def run_fetch() -> None:
     project_dir = _within(
         workspace / _env("PATH_PREFIX", "."), workspace, "path_prefix"
     )
-    pom_file = _env("POM_FILE", "pom.xml")
-    pom = _within(project_dir / pom_file, workspace, "pom_file")
+    pom_file = _env("POM_FILE")
+    pom = _within(project_dir / (pom_file or DEFAULT_POM), workspace, "pom_file")
     # resolve() is not strict, so a path that does not exist passes the
     # checks above; say which input is wrong before Maven is involved
     if not project_dir.is_dir():
@@ -102,7 +114,6 @@ def run_fetch() -> None:
         coordinates = discover_coordinates(
             project_dir, pom_file, _env("MAVEN_ARGS"), help_version, Path(work)
         )
-    baseline = default_baseline()
     result = seed_metadata(coordinates, base_url, fetcher, _m2repo(), baseline)
     groups = top_level_group_paths(coordinates)
     snapshots = sum(1 for c in coordinates if c.is_snapshot)

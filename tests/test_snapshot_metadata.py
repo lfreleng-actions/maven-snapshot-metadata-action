@@ -20,19 +20,20 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from snapshot_metadata import ActionError, cli
 from snapshot_metadata.coordinates import (
+    ACTION_INPUT_PREFIX,
     ACTION_INPUT_VARIABLES,
     HELP_PLUGIN,
     Coordinate,
     discover_coordinates,
-    long_option_names,
     maven_environment,
-    parse_effective_pom,
-    split_maven_args,
+    parse_active_profiles,
     top_level_group_paths,
 )
+from snapshot_metadata.maven_args import long_option_names, split_maven_args
 from snapshot_metadata.nexus import (
     Fetcher,
     Response,
@@ -42,6 +43,7 @@ from snapshot_metadata.nexus import (
 from snapshot_metadata.repository import (
     BASELINE_MARKER,
     FetchResult,
+    checksum_matches,
     prune_metadata,
     seed_metadata,
 )
@@ -56,7 +58,7 @@ CORE_V = f"{CORE}/1.0.0-SNAPSHOT"
 
 def digest(body: bytes, algorithm: str) -> bytes:
     """A checksum file holding the true digest of ``body``."""
-    return hashlib.new(algorithm, body).hexdigest().encode()
+    return hashlib.new(algorithm, body, usedforsecurity=False).hexdigest().encode()
 
 
 def metadata(build: int) -> bytes:
@@ -172,28 +174,29 @@ class TestCoordinate(unittest.TestCase):
         )
 
 
-class TestEffectivePom(TempTestCase):
-    def parse(self, body: str) -> list[Coordinate]:
-        path = self.tmp / "effective-pom.xml"
-        _ = path.write_text(textwrap.dedent(body), encoding="utf-8")
-        return parse_effective_pom(path)
+def listing(*ids: str) -> str:
+    """What help:active-profiles prints for a reactor, as Maven 3.9 logs it."""
+    blocks = [
+        f"Active Profiles for Project '{i}':\n\nThere are no active profiles.\n\n\n"
+        for i in ids
+    ]
+    return "[INFO] \n" + "".join(blocks) + "[INFO] BUILD SUCCESS\n"
 
+
+def print_listing(*ids: str) -> str:
+    """A fake mvn's shell lines printing ``listing(*ids)`` to stdout."""
+    return f"cat <<'LISTING'\n{listing(*ids)}LISTING\n"
+
+
+class TestActiveProfiles(unittest.TestCase):
     def test_reactor_with_inherited_coordinates_and_default_packaging(self) -> None:
-        coordinates = self.parse(
-            """\
-            <?xml version="1.0" encoding="UTF-8"?>
-            <projects>
-              <project xmlns="http://maven.apache.org/POM/4.0.0">
-                <groupId>org.example</groupId><artifactId>parent</artifactId>
-                <version>1.0.0-SNAPSHOT</version><packaging>pom</packaging>
-              </project>
-              <project xmlns="http://maven.apache.org/POM/4.0.0">
-                <parent><groupId>org.other</groupId></parent>
-                <groupId>org.example</groupId><artifactId>core</artifactId>
-                <version>1.0.0-SNAPSHOT</version>
-              </project>
-            </projects>
-            """
+        # Maven reports each project's effective model, so a module that
+        # inherits its groupId and version is listed with both resolved
+        coordinates = parse_active_profiles(
+            listing(
+                "org.example:parent:pom:1.0.0-SNAPSHOT",
+                "org.example:core:jar:1.0.0-SNAPSHOT",
+            )
         )
         self.assertEqual(
             coordinates,
@@ -203,38 +206,51 @@ class TestEffectivePom(TempTestCase):
             ],
         )
 
-    def test_single_module_project_root(self) -> None:
-        coordinates = self.parse(
-            """\
-            <project xmlns="http://maven.apache.org/POM/4.0.0">
-              <groupId>org.example</groupId><artifactId>solo</artifactId>
-              <version>2.0-SNAPSHOT</version>
-            </project>
-            """
+    def test_active_profiles_and_other_log_lines_are_ignored(self) -> None:
+        text = (
+            "[INFO] Scanning for projects...\n[INFO] \n"
+            "Active Profiles for Project 'org.example:solo:jar:2.0-SNAPSHOT':\n\n"
+            "The following profiles are active:\n\n"
+            " - ci (source: org.example:solo:2.0-SNAPSHOT)\n\n"
         )
+        coordinates = parse_active_profiles(text)
         self.assertEqual([c.artifact_id for c in coordinates], ["solo"])
+
+    def test_colour_escapes_and_crlf_are_tolerated(self) -> None:
+        text = "\x1b[1mActive Profiles for Project 'g:a:jar:1-SNAPSHOT':\x1b[m\r\n"
+        self.assertEqual(
+            parse_active_profiles(text), [Coordinate("g", "a", "1-SNAPSHOT", "jar")]
+        )
+
+    def test_no_listing_fails_closed(self) -> None:
+        # -q, or an 'output' property redirecting the report to a file,
+        # leaves Maven successful and stdout without a single project
+        for text in ("", "[INFO] Active profile report written to: /x\n"):
+            with (
+                self.subTest(text=text),
+                self.assertRaisesRegex(ActionError, "listed no projects.*-q.*output"),
+            ):
+                _ = parse_active_profiles(text)
 
     def test_unresolved_property_is_rejected_with_a_hint(self) -> None:
         with self.assertRaisesRegex(ActionError, "unresolved property"):
-            _ = self.parse(
-                """\
-                <project><groupId>org.example</groupId><artifactId>a</artifactId>
-                <version>${revision}</version></project>
-                """
-            )
+            _ = parse_active_profiles(listing("org.example:a:jar:${revision}"))
 
     def test_path_traversal_in_a_coordinate_is_rejected(self) -> None:
         with self.assertRaisesRegex(ActionError, "not a valid coordinate"):
-            _ = self.parse(
-                """\
-                <project><groupId>org.example</groupId><artifactId>..</artifactId>
-                <version>1-SNAPSHOT</version></project>
-                """
-            )
+            _ = parse_active_profiles(listing("org.example:..:jar:1-SNAPSHOT"))
 
-    def test_malformed_document_is_an_action_error(self) -> None:
-        with self.assertRaisesRegex(ActionError, "cannot parse"):
-            _ = self.parse("<projects><project>")
+    def test_an_uninherited_placeholder_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ActionError, "not a valid coordinate"):
+            _ = parse_active_profiles(listing("[inherited]:a:jar:1-SNAPSHOT"))
+
+    def test_a_project_id_without_four_fields_is_rejected(self) -> None:
+        for project_id in ("g:a:1-SNAPSHOT", "g:a:jar:x:1-SNAPSHOT"):
+            with (
+                self.subTest(project_id=project_id),
+                self.assertRaisesRegex(ActionError, "unexpected project id"),
+            ):
+                _ = parse_active_profiles(listing(project_id))
 
 
 class TestMavenArgs(unittest.TestCase):
@@ -393,47 +409,113 @@ class TestMavenArgs(unittest.TestCase):
             ["-fae", "-Drevision=1-SNAPSHOT", "-Pci"],
         )
 
+    def test_quiet_flags_pass_but_are_dropped(self) -> None:
+        # fetch reads Maven's INFO output, which -q would hide
+        self.assertEqual(
+            split_maven_args("-q -Pci --quiet --color -q -B"),
+            ["-Pci", "--color", "-B"],
+        )
 
-class TestDiscoverCoordinates(TempTestCase):
-    def fake_mvn(self, script: str) -> str:
+
+class FakeMavenTestCase(TempTestCase):
+    """Provides a stand-in mvn script that reports a given version."""
+
+    def fake_mvn(self, script: str, banner: str = "Apache Maven 3.9.9 (abc)") -> str:
         path = self.tmp / "mvn"
-        _ = path.write_text("#!/bin/sh\n" + textwrap.dedent(script), encoding="utf-8")
+        version = f'case " $* " in *" --version "*) echo \'{banner}\'; exit 0 ;; esac\n'
+        _ = path.write_text(
+            "#!/bin/sh\n" + version + textwrap.dedent(script), encoding="utf-8"
+        )
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
         return str(path)
 
-    def test_writes_output_after_caller_args_and_parses_it(self) -> None:
+
+class TestDiscoverCoordinates(FakeMavenTestCase):
+    def test_maven_before_3_9_is_refused(self) -> None:
+        # Its launcher ignores MAVEN_ARGS, so a deploy on it would not
+        # see the -Drevision fetch replays, and deploy unseeded
+        os.environ["MAVEN_ARGS"] = "-Drevision=2-SNAPSHOT"
+        self.addCleanup(os.environ.pop, "MAVEN_ARGS")
+        for version, accepted in (
+            ("2.2.1", False),
+            ("3.6.3", False),
+            ("3.8.8", False),
+            ("3.9.0", True),
+            ("3.10.0", True),
+            ("4.0.0-rc-7", True),
+        ):
+            with self.subTest(version=version):
+                mvn = self.fake_mvn(
+                    print_listing("g:a:jar:1-SNAPSHOT"),
+                    banner=f"Apache Maven {version} (abc)",
+                )
+                if accepted:
+                    _ = discover_coordinates(
+                        self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn
+                    )
+                    continue
+                with self.assertRaisesRegex(ActionError, "needs Maven 3.9 or newer"):
+                    _ = discover_coordinates(
+                        self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn
+                    )
+
+    def test_an_unreadable_maven_version_fails_closed(self) -> None:
+        mvn = self.fake_mvn("exit 0\n", banner="Maven home: /opt/maven")
+        with self.assertRaisesRegex(ActionError, "no Maven version"):
+            _ = discover_coordinates(self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn)
+
+    def test_reads_the_listing_without_defining_any_property(self) -> None:
+        # A property fetch defined would reach model interpolation and
+        # profile activation, which the deploy would not share
         log = self.tmp / "args.log"
         mvn = self.fake_mvn(
-            f"""\
-            printf '%s\\n' "$@" > '{log}'
-            for arg in "$@"; do
-              case "$arg" in -Doutput=*) out="${{arg#-Doutput=}}" ;; esac
-            done
-            printf '<project><groupId>g.h</groupId><artifactId>a</artifactId>'\\
-            '<version>1-SNAPSHOT</version></project>' > "$out"
-            """
+            f"printf '%s\\n' \"$@\" > '{log}'\n" + print_listing("g.h:a:jar:1-SNAPSHOT")
         )
         coordinates = discover_coordinates(
-            self.tmp, "pom.xml", "-Doutput=/elsewhere -Pci", "3.5.2", self.tmp, mvn
+            self.tmp, "pom.xml", "-Pci", "3.5.2", self.tmp, mvn
         )
         self.assertEqual([c.group_id for c in coordinates], ["g.h"])
         args = log.read_text(encoding="utf-8").split("\n")
-        self.assertIn(f"{HELP_PLUGIN}:3.5.2:effective-pom", args)
-        outputs = [a for a in args if a.startswith("-Doutput=")]
-        self.assertEqual(outputs[-1], f"-Doutput={self.tmp / 'effective-pom.xml'}")
+        self.assertIn(f"{HELP_PLUGIN}:3.5.2:active-profiles", args)
+        self.assertEqual([a for a in args if a.startswith("-D")], [])
+
+    def test_quiet_flags_are_not_replayed(self) -> None:
+        # -q hides the INFO listing fetch reads, and shapes no reactor
+        log = self.tmp / "args.log"
+        mvn = self.fake_mvn(
+            f"printf '%s\\n' \"$@\" > '{log}'\n" + print_listing("g:a:jar:1-SNAPSHOT")
+        )
+        os.environ["MAVEN_ARGS"] = "-q -Pextra"
+        self.addCleanup(os.environ.pop, "MAVEN_ARGS")
+        _ = discover_coordinates(
+            self.tmp, "pom.xml", "--quiet -Pci --color -q", "3.5.2", self.tmp, mvn
+        )
+        args = log.read_text(encoding="utf-8").split("\n")
+        self.assertNotIn("-q", args)
+        self.assertNotIn("--quiet", args)
+        self.assertIn("-Pextra", args)
+        self.assertIn("--color", args)
+
+    def test_a_successful_run_listing_no_projects_fails(self) -> None:
+        mvn = self.fake_mvn("echo '[INFO] Active profile report written to: x'\n")
+        with self.assertRaisesRegex(ActionError, "listed no projects"):
+            _ = discover_coordinates(self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn)
+
+    def test_output_that_is_not_utf_8_is_still_read(self) -> None:
+        mvn = self.fake_mvn(
+            "printf '[INFO] \\377\\376\\n'\n" + print_listing("g:a:jar:1-SNAPSHOT")
+        )
+        coordinates = discover_coordinates(
+            self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn
+        )
+        self.assertEqual([c.artifact_id for c in coordinates], ["a"])
 
     def test_maven_args_from_the_environment_are_checked_and_replayed(self) -> None:
         log = self.tmp / "args.log"
         mvn = self.fake_mvn(
-            f"""\
-            printf '%s\\n' "$@" > '{log}'
-            env | grep -c '^MAVEN_ARGS=' >> '{log}' || true
-            for arg in "$@"; do
-              case "$arg" in -Doutput=*) out="${{arg#-Doutput=}}" ;; esac
-            done
-            printf '<project><groupId>g</groupId><artifactId>a</artifactId>'\\
-            '<version>1-SNAPSHOT</version></project>' > "$out"
-            """
+            f"printf '%s\\n' \"$@\" > '{log}'\n"
+            + f"env | grep -c '^MAVEN_ARGS=' >> '{log}' || true\n"
+            + print_listing("g:a:jar:1-SNAPSHOT")
         )
         os.environ["MAVEN_ARGS"] = "-Pextra -Drevision=2-SNAPSHOT"
         self.addCleanup(os.environ.pop, "MAVEN_ARGS")
@@ -452,6 +534,19 @@ class TestDiscoverCoordinates(TempTestCase):
         with self.assertRaisesRegex(ActionError, "MAVEN_ARGS: .*narrows the reactor"):
             _ = discover_coordinates(self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn)
 
+    def test_maven_args_the_launcher_would_expand_fail(self) -> None:
+        # Maven's launcher word-splits and glob-expands MAVEN_ARGS, so a
+        # replay of these tokens could differ from what the deploy reads
+        mvn = self.fake_mvn("exit 0\n")
+        self.addCleanup(os.environ.pop, "MAVEN_ARGS", None)
+        for value in ("-Dinclude=*", "-Dx=a?", "-Dx=[ab]", "-Dx=a\u00a0-Pb"):
+            with self.subTest(value=value):
+                os.environ["MAVEN_ARGS"] = value
+                with self.assertRaisesRegex(ActionError, "MAVEN_ARGS: .*launcher"):
+                    _ = discover_coordinates(
+                        self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn
+                    )
+
     def test_maven_failure_is_an_action_error(self) -> None:
         mvn = self.fake_mvn("echo 'boom'; exit 3\n")
         with self.assertRaisesRegex(ActionError, "exit 3"):
@@ -460,44 +555,44 @@ class TestDiscoverCoordinates(TempTestCase):
     def test_maven_does_not_inherit_the_nexus_password(self) -> None:
         env_log = self.tmp / "env.log"
         mvn = self.fake_mvn(
-            f"""\
-            env > '{env_log}'
-            for arg in "$@"; do
-              case "$arg" in -Doutput=*) out="${{arg#-Doutput=}}" ;; esac
-            done
-            printf '<project><groupId>g</groupId><artifactId>a</artifactId>'\\
-            '<version>1-SNAPSHOT</version></project>' > "$out"
-            """
+            f"env > '{env_log}'\n" + print_listing("g:a:jar:1-SNAPSHOT")
         )
-        os.environ["INPUT_NEXUS_PASSWORD"] = "s3cr3t-value"
-        self.addCleanup(os.environ.pop, "INPUT_NEXUS_PASSWORD")
+        password = f"{ACTION_INPUT_PREFIX}NEXUS_PASSWORD"
+        os.environ[password] = "s3cr3t-value"
+        self.addCleanup(os.environ.pop, password)
         _ = discover_coordinates(self.tmp, "pom.xml", "", "3.5.2", self.tmp, mvn)
         seen = env_log.read_text(encoding="utf-8")
         self.assertNotIn("s3cr3t-value", seen)
-        self.assertNotIn("INPUT_", seen)
+        self.assertNotIn(ACTION_INPUT_PREFIX, seen)
         self.assertIn("PATH=", seen)
 
     def test_maven_environment_drops_action_inputs_and_maven_args(self) -> None:
         env = maven_environment(
-            {"INPUT_NEXUS_PASSWORD": "x", "MAVEN_ARGS": "-pl app", "JAVA_HOME": "/j"}
+            {
+                f"{ACTION_INPUT_PREFIX}NEXUS_PASSWORD": "x",
+                "MAVEN_ARGS": "-pl app",
+                "JAVA_HOME": "/j",
+            }
         )
         self.assertEqual(env, {"JAVA_HOME": "/j"})
 
     def test_a_callers_own_input_variables_reach_maven(self) -> None:
-        # A profile may activate on env.INPUT_INCLUDE_EXTRA, and the deploy
-        # that follows still sees it, so fetch must too
-        env = maven_environment({"INPUT_INCLUDE_EXTRA": "1", "INPUT_MODE": "fetch"})
-        self.assertEqual(env, {"INPUT_INCLUDE_EXTRA": "1"})
+        # A profile may activate on env.INPUT_MODE, and the deploy that
+        # follows still sees the caller's value, so fetch must too, even
+        # where the name matches one of this action's inputs
+        caller = {"INPUT_MODE": "extra", "INPUT_NEXUS_PASSWORD": "theirs"}
+        env = maven_environment({**caller, f"{ACTION_INPUT_PREFIX}MODE": "fetch"})
+        self.assertEqual(env, caller)
 
     def test_the_stripped_variables_match_action_yaml(self) -> None:
-        # One INPUT_<NAME> per declared input, all set by the step's env
+        # One variable per declared input, all set by the step's env
         text = (
             pathlib.Path(__file__).resolve().parent.parent / "action.yaml"
         ).read_text(encoding="utf-8")
         inputs_block = text.split("\noutputs:")[0]
         names: list[str] = re.findall(r"^  ([a-z0-9_]+):$", inputs_block, re.M)
-        declared = {f"INPUT_{name.upper()}" for name in names}
-        found: list[str] = re.findall(r"^\s+(INPUT_[A-Z0-9_]+):", text, re.M)
+        declared = {f"{ACTION_INPUT_PREFIX}{name.upper()}" for name in names}
+        found: list[str] = re.findall(r"^\s+([A-Z][A-Z0-9_]*):", text, re.M)
         exported = set(found)
         self.assertEqual(declared, exported)
         self.assertEqual(set(ACTION_INPUT_VARIABLES), exported)
@@ -507,6 +602,199 @@ class TestDiscoverCoordinates(TempTestCase):
             _ = discover_coordinates(
                 self.tmp, "pom.xml", "", "3.5.2", self.tmp, str(self.tmp / "absent")
             )
+
+
+class TestMavenConfigPom(FakeMavenTestCase):
+    """A .mvn/maven.config may pick the POM a plain 'mvn deploy' builds.
+
+    A command-line -f overrides it, so fetch's -f and a deploy without
+    one can read different reactors. With pom_file unset, fetch cannot
+    tell which the deploy does, so it requires both to agree.
+    """
+
+    log: Path = Path()
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.log = self.tmp / "calls.log"
+
+    def branching_mvn(self, with_file: str, without_file: str | None) -> str:
+        """Lists ``with_file`` given -f, else ``without_file`` or fails."""
+        plain = print_listing(without_file) if without_file else "exit 1\n"
+        return self.fake_mvn(
+            f"printf '%s\\n' \"$*\" >> '{self.log}'\n"
+            + 'case " $* " in *" -f "*)\n'
+            + print_listing(with_file)
+            + ";;\n*)\n"
+            + plain
+            + ";;\nesac\n"
+        )
+
+    def calls(self) -> list[str]:
+        return self.log.read_text(encoding="utf-8").splitlines()
+
+    def discover(
+        self, mvn: str, pom_file: str = "", project: Path | None = None
+    ) -> list[Coordinate]:
+        project = project or self.tmp
+        return discover_coordinates(project, pom_file, "", "3.5.2", self.tmp, mvn)
+
+    def test_without_a_maven_config_fetch_reads_pom_xml_once(self) -> None:
+        mvn = self.branching_mvn("g:a:jar:1-SNAPSHOT", "g:other:jar:1-SNAPSHOT")
+        self.assertEqual([c.artifact_id for c in self.discover(mvn)], ["a"])
+        self.assertEqual(len(self.calls()), 1)
+        self.assertIn(" -f pom.xml ", f" {self.calls()[0]} ")
+
+    def test_a_config_selecting_another_reactor_fails(self) -> None:
+        _ = self.write(self.tmp, ".mvn/maven.config", b"--file=alt.xml\n")
+        mvn = self.branching_mvn("g:a:jar:1-SNAPSHOT", "g:alt:pom:1-SNAPSHOT")
+        with self.assertRaisesRegex(ActionError, "maven.config.*set pom_file"):
+            _ = self.discover(mvn)
+        self.assertNotIn(" -f ", f" {self.calls()[1]} ")
+
+    def test_a_config_agreeing_with_pom_xml_passes(self) -> None:
+        _ = self.write(self.tmp, ".mvn/maven.config", b"-T\n4\n")
+        mvn = self.branching_mvn("g:a:jar:1-SNAPSHOT", "g:a:jar:1-SNAPSHOT")
+        self.assertEqual([c.artifact_id for c in self.discover(mvn)], ["a"])
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_a_config_above_path_prefix_counts(self) -> None:
+        # Maven walks up from the project to the first .mvn it finds
+        _ = self.write(self.tmp, ".mvn/maven.config", b"--file=alt.xml\n")
+        (self.tmp / "sub").mkdir()
+        mvn = self.branching_mvn("g:a:jar:1-SNAPSHOT", "g:alt:pom:1-SNAPSHOT")
+        with self.assertRaisesRegex(ActionError, "set pom_file"):
+            _ = self.discover(mvn, project=self.tmp / "sub")
+
+    def test_a_plain_run_that_fails_fails_closed(self) -> None:
+        # e.g. the config names a POM that does not exist
+        _ = self.write(self.tmp, ".mvn/maven.config", b"--file=missing.xml\n")
+        mvn = self.branching_mvn("g:a:jar:1-SNAPSHOT", None)
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ActionError, "without -f failed.*set pom_file"),
+        ):
+            _ = self.discover(mvn)
+
+    def test_an_explicit_pom_file_is_passed_as_is(self) -> None:
+        # The caller names the POM the deploy's own -f selects, which
+        # overrides the config there as it does here
+        _ = self.write(self.tmp, ".mvn/maven.config", b"--file=alt.xml\n")
+        mvn = self.branching_mvn("g:a:jar:1-SNAPSHOT", "g:alt:pom:1-SNAPSHOT")
+        self.assertEqual(
+            [c.artifact_id for c in self.discover(mvn, pom_file="pom.xml")], ["a"]
+        )
+        self.assertEqual(len(self.calls()), 1)
+
+
+@unittest.skipUnless(
+    os.environ.get("RUN_MAVEN_TESTS") == "1",
+    "runs Maven and resolves maven-help-plugin; set RUN_MAVEN_TESTS=1",
+)
+class TestRealMaven(TempTestCase):
+    """Discovery on a real Maven, where the help plugin's own parameters bite.
+
+    The reactor builds module c unless an 'output' property is defined,
+    so a property fetch defined itself would hide a module the deploy
+    builds. A help plugin 'artifact' parameter, from any source, would
+    swap the whole reactor for one artifact under help:effective-pom.
+    """
+
+    BUILT: tuple[str, ...] = ("a", "b", "c", "root")
+
+    def reactor(self, properties: str = "") -> Path:
+        project = self.tmp / "project"
+        # Marks the root for Maven 4, which warns without it
+        (project / ".mvn").mkdir(parents=True, exist_ok=True)
+        pom = f"""\
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>org.fx</groupId><artifactId>root</artifactId>
+              <version>1.0.0-SNAPSHOT</version><packaging>pom</packaging>
+              <properties>{properties}</properties>
+              <modules><module>a</module><module>b</module></modules>
+              <profiles><profile><id>unless-output</id>
+                <activation><property><name>!output</name></property></activation>
+                <modules><module>c</module></modules>
+              </profile></profiles>
+            </project>
+            """
+        _ = self.write(project, "pom.xml", textwrap.dedent(pom).encode())
+        for module in ("a", "b", "c"):
+            child = f"""\
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <parent><groupId>org.fx</groupId><artifactId>root</artifactId>
+                    <version>1.0.0-SNAPSHOT</version></parent>
+                  <artifactId>{module}</artifactId>
+                </project>
+                """
+            _ = self.write(
+                project, f"{module}/pom.xml", textwrap.dedent(child).encode()
+            )
+        return project
+
+    def discover(
+        self, project: Path, maven_args: str = "", pom_file: str = ""
+    ) -> tuple[str, ...]:
+        work = self.tmp / "work"
+        work.mkdir(exist_ok=True)
+        found = discover_coordinates(project, pom_file, maven_args, "3.5.2", work)
+        return tuple(sorted(c.artifact_id for c in found))
+
+    def with_maven_args(self, value: str) -> None:
+        os.environ["MAVEN_ARGS"] = value
+        self.addCleanup(os.environ.pop, "MAVEN_ARGS", None)
+
+    def test_fetch_defines_no_property_the_build_would_not_see(self) -> None:
+        self.assertEqual(self.discover(self.reactor()), self.BUILT)
+
+    def test_an_artifact_property_cannot_narrow_the_reactor(self) -> None:
+        artifact = "org.fx:a:1.0.0-SNAPSHOT"
+        with self.subTest(source="POM property"):
+            project = self.reactor(f"<artifact>{artifact}</artifact>")
+            self.assertEqual(self.discover(project), self.BUILT)
+        with self.subTest(source="maven_args"):
+            project = self.reactor()
+            self.assertEqual(
+                self.discover(project, f"-Dartifact={artifact}"), self.BUILT
+            )
+        with self.subTest(source="MAVEN_ARGS"):
+            self.with_maven_args(f"-Dartifact={artifact}")
+            self.assertEqual(self.discover(self.reactor()), self.BUILT)
+
+    def test_quiet_maven_args_still_read_the_reactor(self) -> None:
+        self.with_maven_args("-q")
+        self.assertEqual(self.discover(self.reactor(), "--quiet"), self.BUILT)
+
+    def test_a_maven_config_selecting_another_pom_needs_pom_file(self) -> None:
+        # A plain 'mvn deploy' builds alt.xml's reactor, while fetch's -f,
+        # like maven-build-action's, would override the config
+        project = self.reactor()
+        alt = """\
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>org.fx</groupId><artifactId>alt</artifactId>
+              <version>1.0.0-SNAPSHOT</version><packaging>pom</packaging>
+              <modules><module>a</module><module>b</module></modules>
+            </project>
+            """
+        _ = self.write(project, "alt.xml", textwrap.dedent(alt).encode())
+        _ = self.write(project, ".mvn/maven.config", b"--file=alt.xml\n")
+        with self.assertRaisesRegex(ActionError, "set pom_file"):
+            _ = self.discover(project)
+        self.assertEqual(self.discover(project, pom_file="alt.xml"), ("a", "alt", "b"))
+        self.assertEqual(self.discover(project, pom_file="pom.xml"), self.BUILT)
+
+    def test_an_output_property_fails_closed(self) -> None:
+        # It sends the listing to a file, leaving stdout without one
+        project = self.reactor(f"<output>{self.tmp / 'report.txt'}</output>")
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ActionError, "listed no projects"),
+        ):
+            _ = self.discover(project)
 
 
 class TestRepositoryUrl(unittest.TestCase):
@@ -642,6 +930,21 @@ class TestFetch(NexusTestCase):
         result = self.seed([coordinate()])
         self.assertEqual(result.files, 2)
 
+    def test_md5_is_checked_where_fips_disables_it_for_security(self) -> None:
+        # A FIPS OpenSSL build refuses MD5 unless the caller declares it
+        # a non-security use, which Maven's legacy checksum is
+        real_new = hashlib.new
+        body = ARTIFACT_METADATA
+        sidecar = digest(body, "md5")
+
+        def fips_new(name: str, data: bytes = b"", **kwargs: bool) -> object:
+            if name == "md5" and kwargs.get("usedforsecurity", True):
+                raise ValueError("[digital envelope routines] unsupported")
+            return real_new(name, data, **kwargs)
+
+        with mock.patch("hashlib.new", fips_new):
+            self.assertTrue(checksum_matches(sidecar, body, ".md5"))
+
     def test_partial_history_seeds_what_exists(self) -> None:
         _ = self.write(
             self.server_root, f"{CORE}/maven-metadata.xml", ARTIFACT_METADATA
@@ -710,6 +1013,20 @@ class TestFetch(NexusTestCase):
         with self.assertRaisesRegex(ActionError, "not XML metadata"):
             _ = self.seed([coordinate()])
 
+    def test_a_declared_encoding_expat_cannot_use_is_rejected(self) -> None:
+        # Unknown (LookupError), multi-byte (ValueError), and failing to
+        # decode (UnicodeError): none of them a ParseError
+        for encoding in ("x-unknown", "shift_jis", "idna"):
+            body = f'<?xml version="1.0" encoding="{encoding}"?><metadata/>'
+            _ = self.write(
+                self.server_root, f"{CORE}/maven-metadata.xml", body.encode()
+            )
+            with (
+                self.subTest(encoding=encoding),
+                self.assertRaisesRegex(ActionError, "not XML metadata"),
+            ):
+                _ = self.seed([coordinate()])
+
     def test_interrupted_fetch_leaves_a_baseline_prune_refuses(self) -> None:
         # An earlier fetch completed, so its marker exists
         _ = self.seed([coordinate()])
@@ -731,6 +1048,50 @@ class TestFetch(NexusTestCase):
         with self.assertRaisesRegex(ActionError, "needs a clean m2repo"):
             _ = self.seed([coordinate()])
 
+    def test_a_dangling_metadata_symlink_in_the_m2repo_is_refused(self) -> None:
+        # The server 404s, so seeding never writes through it; left in
+        # place, the deploy would follow it out of the m2repo
+        outside = self.tmp / "outside" / "maven-metadata.xml"
+        (self.m2repo / CORE_V).mkdir(parents=True)
+        (self.m2repo / CORE_V / "maven-metadata.xml").symlink_to(outside)
+        with self.assertRaisesRegex(ActionError, "needs a clean m2repo"):
+            _ = self.seed([coordinate()])
+        self.assertFalse(outside.exists())
+        self.assertFalse((self.baseline / BASELINE_MARKER).exists())
+
+    def test_a_symlinked_directory_in_the_m2repo_is_refused(self) -> None:
+        # The server 404s, so no path under it is ever written or checked;
+        # left in place, the deploy would write through it
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.m2repo / "org").mkdir(parents=True)
+        (self.m2repo / "org" / "example").symlink_to(outside)
+        with self.assertRaisesRegex(ActionError, r"symbolic link.*org/example"):
+            _ = self.seed([coordinate()])
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((self.baseline / BASELINE_MARKER).exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads directories regardless of mode")
+    def test_an_m2repo_directory_the_scan_cannot_read_fails(self) -> None:
+        # Traversable but unreadable: a link inside would stay hidden
+        (self.m2repo / "org").mkdir(parents=True)
+        (self.m2repo / "org").chmod(0o300)
+        self.addCleanup((self.m2repo / "org").chmod, 0o700)
+        with self.assertRaises(PermissionError):
+            _ = self.seed([coordinate()])
+        self.assertFalse((self.baseline / BASELINE_MARKER).exists())
+
+    def test_a_symlinked_m2repo_root_is_accepted(self) -> None:
+        # A caller may keep the whole m2repo elsewhere; only links beneath
+        # it could lead the deploy out of the tree that publishes
+        _ = self.write(self.m2repo, f"{CORE_V}/core.jar", b"jar")
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.m2repo)
+        _ = seed_metadata(
+            [coordinate()], self.base_url(), self.fetcher(), alias, self.baseline
+        )
+        self.assertTrue((self.baseline / BASELINE_MARKER).is_file())
+
     def test_an_m2repo_holding_artefacts_only_is_accepted(self) -> None:
         _ = self.write(self.m2repo, f"{CORE_V}/core.jar", b"jar")
         _ = self.seed([coordinate()])
@@ -744,7 +1105,7 @@ class TestFetch(NexusTestCase):
         outside.mkdir()
         (self.m2repo / "org").mkdir(parents=True)
         (self.m2repo / "org" / "example").symlink_to(outside)
-        with self.assertRaisesRegex(ActionError, "outside"):
+        with self.assertRaisesRegex(ActionError, "symbolic link at org/example"):
             _ = self.seed([coordinate()])
         self.assertEqual(list(outside.iterdir()), [])
 
@@ -788,10 +1149,14 @@ class TestPrune(NexusTestCase):
 
     def test_untouched_metadata_and_its_siblings_are_removed(self) -> None:
         self.fetch_core()
-        _ = self.write(self.m2repo, f"{CORE_V}/maven-metadata.xml.asc", b"sig")
+        # A signature has checksums of its own, which would otherwise
+        # replace the server's for a signature this build never ships
+        for suffix in (".asc", ".asc.md5", ".asc.sha1", ".asc.sha256", ".asc.sha512"):
+            _ = self.write(self.m2repo, f"{CORE_V}/maven-metadata.xml{suffix}", b"x")
         result = prune_metadata(self.m2repo, self.baseline)
         self.assertEqual(len(result.removed), 2)
         self.assertEqual(list(self.m2repo.rglob("maven-metadata.xml*")), [])
+        self.assertEqual(result.removed_files, 8)
         self.assertEqual(result.kept, 0)
 
     def test_sibling_published_during_the_build_is_not_reverted(self) -> None:
@@ -830,6 +1195,40 @@ class TestPrune(NexusTestCase):
     def test_prune_without_a_baseline_fails(self) -> None:
         with self.assertRaisesRegex(ActionError, "run mode 'fetch' first"):
             _ = prune_metadata(self.m2repo, self.tmp / "nothing")
+
+    def test_a_symlink_the_build_left_is_not_followed(self) -> None:
+        # fetch refuses links it finds, but the build runs after it
+        self.fetch_core()
+        outside = self.tmp / "outside"
+        _ = shutil.move(str(self.m2repo / CORE), str(outside))
+        (self.m2repo / CORE).symlink_to(outside)
+        with self.assertRaisesRegex(ActionError, "resolves outside"):
+            _ = prune_metadata(self.m2repo, self.baseline)
+        self.assertTrue((outside / "maven-metadata.xml").is_file())
+
+    @unittest.skipIf(sys.version_info >= (3, 13), "3.13 resolves a loop as is")
+    def test_a_symlink_loop_the_build_left_is_an_action_error(self) -> None:
+        self.fetch_core()
+        shutil.rmtree(self.m2repo / CORE)
+        (self.m2repo / CORE).symlink_to(self.m2repo / CORE)
+        with self.assertRaisesRegex(ActionError, "symbolic link loop"):
+            _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_a_baseline_fetched_into_another_m2repo_is_refused(self) -> None:
+        # Every baseline file would be missing there and count as pruned,
+        # while the seeded copies in the real m2repo went on to publish
+        self.fetch_core()
+        seeded = sorted(self.m2repo.rglob("maven-metadata.xml*"))
+        with self.assertRaisesRegex(ActionError, "same m2repo_path"):
+            _ = prune_metadata(self.tmp / "elsewhere", self.baseline)
+        self.assertEqual(sorted(self.m2repo.rglob("maven-metadata.xml*")), seeded)
+
+    def test_the_m2repo_is_compared_once_resolved(self) -> None:
+        self.fetch_core()
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.m2repo)
+        result = prune_metadata(alias, self.baseline)
+        self.assertEqual(len(result.removed), 2)
 
 
 class TestOutputHandling(TempTestCase):
@@ -894,10 +1293,10 @@ class TestEntryPoint(TempTestCase):
         env = {
             "GITHUB_WORKSPACE": str(self.tmp),
             "RUNNER_TEMP": str(self.tmp / "runner-temp"),
-            "INPUT_NEXUS_SERVER": "https://nexus.example.org",
-            "INPUT_REPOSITORY_NAME": "snapshots",
+            f"{ACTION_INPUT_PREFIX}NEXUS_SERVER": "https://nexus.example.org",
+            f"{ACTION_INPUT_PREFIX}REPOSITORY_NAME": "snapshots",
         }
-        env.update({f"INPUT_{k.upper()}": v for k, v in inputs.items()})
+        env.update({f"{ACTION_INPUT_PREFIX}{k.upper()}": v for k, v in inputs.items()})
         saved = {k: os.environ.get(k) for k in env}
         os.environ.update(env)
         try:
@@ -917,6 +1316,27 @@ class TestEntryPoint(TempTestCase):
         self.assertIn("::error::", out)
         self.assertIn(expected, out)
 
+    def complete_fetch(self) -> Path:
+        """A baseline as a successful fetch of nothing leaves it."""
+        baseline = self.tmp / "runner-temp" / "maven-snapshot-metadata" / "baseline"
+        fetcher = Fetcher(None, 1, 0)
+        _ = seed_metadata([], "unused", fetcher, self.tmp / "m2repo", baseline)
+        return baseline
+
+    def test_a_failed_fetch_leaves_no_baseline_prune_accepts(self) -> None:
+        # An always() prune after a fetch that failed early must not take
+        # an earlier fetch's baseline in the same job as current
+        for failing in (
+            {"fetch_attempts": "0"},
+            {"nexus_server": "ftp://nexus.example.org"},
+            {"path_prefix": "absent"},
+        ):
+            with self.subTest(**failing):
+                _ = self.complete_fetch()
+                self.assertEqual(self.run_main(mode="prune")[0], 0)
+                self.assertEqual(self.run_main(mode="fetch", **failing)[0], 1)
+                self.assert_clean_error("run mode 'fetch' first", mode="prune")
+
     def test_a_missing_path_prefix_is_an_error(self) -> None:
         self.assert_clean_error(
             "is not a directory", mode="fetch", path_prefix="absent"
@@ -932,15 +1352,25 @@ class TestEntryPoint(TempTestCase):
         (self.tmp / "project").mkdir()
         self.assert_clean_error("does not exist", mode="fetch", path_prefix="project")
 
+    def test_a_symlink_loop_in_an_input_path_is_an_error(self) -> None:
+        # Python 3.12 and older raise RuntimeError resolving one, which
+        # main() does not catch; 3.13 resolves it and fails further on
+        (self.tmp / "loop").symlink_to(self.tmp / "loop")
+        for inputs in (
+            {"mode": "fetch", "path_prefix": "loop"},
+            {"mode": "fetch", "pom_file": "loop"},
+            {"mode": "prune", "m2repo_path": "loop"},
+        ):
+            with self.subTest(**inputs):
+                self.assert_clean_error("::error::", **inputs)
+
     def test_an_unknown_mode_is_an_error(self) -> None:
         self.assert_clean_error("mode must be", mode="publish")
 
     @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of mode")
     def test_os_errors_become_annotations(self) -> None:
         # A seeded metadata file prune cannot read: a real PermissionError
-        baseline = self.tmp / "runner-temp" / "maven-snapshot-metadata" / "baseline"
-        baseline.mkdir(parents=True)
-        _ = (baseline / BASELINE_MARKER).write_text("fetch\n", encoding="utf-8")
+        baseline = self.complete_fetch()
         seeded = self.write(baseline, f"{CORE}/maven-metadata.xml", ARTIFACT_METADATA)
         _ = self.write(
             self.tmp / "m2repo", f"{CORE}/maven-metadata.xml", ARTIFACT_METADATA

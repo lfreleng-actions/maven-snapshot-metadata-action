@@ -121,11 +121,25 @@ deploys to as `group_paths`, which makes an overlap easy to spot.
 
 ## How fetch finds the modules
 
-`fetch` runs `maven-help-plugin`'s `effective-pom` goal once over the
-whole reactor. Maven itself applies parent inheritance and property
-interpolation, so a module that inherits its `groupId` or `version`
-resolves as the deploy will see it. A version still holding a
-`${...}` property fails with a hint to define it in `maven_args`.
+`fetch` runs `maven-help-plugin`'s `active-profiles` goal once over
+the whole reactor, which lists every project Maven builds by its
+`groupId:artifactId:packaging:version`. Maven itself applies parent
+inheritance and property interpolation, so a module that inherits its
+`groupId` or `version` resolves as the deploy will see it. A version
+still holding a `${...}` property fails with a hint to define it in
+`maven_args`.
+
+`fetch` reads that list from Maven's output and defines no property of
+its own, so profiles activate and properties interpolate as they do in
+the deploy. It avoids `help:effective-pom` on purpose. That goal's
+`artifact` parameter, set as a property on the command line, in
+`MAVEN_ARGS`, in `.mvn/maven.config` or in a POM, swaps the whole
+reactor for that one artifact. Writing its result to a file would
+also mean defining an `output` property the deploy never sees.
+`active-profiles` has no `artifact` parameter; `output` is its sole
+one. If something defines that, or a `-q` in `.mvn/maven.config`
+silences Maven, the list never reaches the output, and `fetch` fails
+rather than seeding nothing.
 
 For each module it requests what the deploy plugin reads, and no more:
 
@@ -139,7 +153,7 @@ It never crawls the group tree, so the request count scales with the
 module count rather than the repository's history.
 
 > ⚠️ **fetch runs Maven over the checkout.** Maven loads project
-> extensions while building the effective POM, so treat the checkout as
+> extensions while building the reactor, so treat the checkout as
 > executable input, as the build that follows does. Run this
 > action where the build runs, on merged code.
 
@@ -168,31 +182,39 @@ action connects directly and ignores `HTTPS_PROXY`.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                | Required | Default                    | Description                                             |
-| ------------------- | -------- | -------------------------- | ------------------------------------------------------- |
-| mode                | True     |                            | `fetch` before the build, `prune` after it              |
-| nexus_server        | fetch    |                            | Nexus server URL; `https`, or `http` for loopback       |
-| repository_name     | fetch    |                            | Nexus repository the SNAPSHOTs publish to               |
-| nexus_version       | False    | `2`                        | Repository URL layout: `2` or `3`                       |
-| nexus_username      | False    |                            | Username for a repository that requires read access     |
-| nexus_password      | False    |                            | Password for `nexus_username`; the two come as a pair   |
-| path_prefix         | False    | `.`                        | Project directory, relative to the workspace            |
-| pom_file            | False    | `pom.xml`                  | POM to read the reactor from, relative to `path_prefix` |
-| maven_args          | False    |                            | Extra Maven arguments for reading the reactor           |
-| help_plugin_version | False    | `3.5.2`                    | `maven-help-plugin` version that reads the reactor      |
-| fetch_attempts      | False    | `4`                        | Attempts per file on transient failures, 1 to 10        |
-| retry_delay         | False    | `2`                        | Seconds before the first retry, doubling, 0 to 60       |
-| m2repo_path         | False    | `$GITHUB_WORKSPACE/m2repo` | Local deploy repository, within the workspace           |
-| baseline_path       | False    | fetch's location           | Baseline written by `fetch`, if it moved                |
+| Name                | Required | Default                    | Description                                                             |
+| ------------------- | -------- | -------------------------- | ----------------------------------------------------------------------- |
+| mode                | True     |                            | `fetch` before the build, `prune` after it                              |
+| nexus_server        | fetch    |                            | Nexus server URL; `https`, or `http` for loopback                       |
+| repository_name     | fetch    |                            | Nexus repository the SNAPSHOTs publish to                               |
+| nexus_version       | False    | `2`                        | Repository URL layout: `2` or `3`                                       |
+| nexus_username      | False    |                            | Username for a repository that requires read access                     |
+| nexus_password      | False    |                            | Password for `nexus_username`; the two come as a pair                   |
+| path_prefix         | False    | `.`                        | Project directory, relative to the workspace                            |
+| pom_file            | False    |                            | POM the deploy builds, relative to `path_prefix`; empty reads `pom.xml` |
+| maven_args          | False    |                            | Extra Maven arguments for reading the reactor                           |
+| help_plugin_version | False    | `3.5.2`                    | `maven-help-plugin` version that reads the reactor                      |
+| fetch_attempts      | False    | `4`                        | Attempts per file on transient failures, 1 to 10                        |
+| retry_delay         | False    | `2`                        | Seconds before the first retry, doubling, 0 to 60                       |
+| m2repo_path         | False    | `$GITHUB_WORKSPACE/m2repo` | Local deploy repository, within the workspace                           |
+| baseline_path       | False    | fetch's location           | Baseline written by `fetch`, if it moved                                |
 
 <!-- markdownlint-enable MD013 -->
 
 The `m2repo_path` default matches the fixed path
 [maven-build-action](https://github.com/lfreleng-actions/maven-build-action)
 deploys to. Pass its `m2repo_path` output rather than assuming it.
+`prune` refuses a baseline that `fetch` seeded into another `m2repo`,
+since the deploy there started without the published metadata.
+
+`maven_args` must carry the same reactor-shaping options the deploy
+passes: its profiles, properties and settings files. `fetch` can't see
+the deploy's options, so an option given to one run but not the other can
+resolve different modules or versions, and a module `fetch` never saw
+deploys from build 1.
 
 `maven_args` splits on whitespace without a shell, and accepts the
-options that shape how the effective POM resolves, and nothing else:
+options that shape how the reactor resolves, and nothing else:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -205,11 +227,13 @@ options that shape how the effective POM resolves, and nothing else:
 <!-- markdownlint-enable MD013 -->
 
 Pass each by its short or long name, with a value attached (`-Pci`,
-`--settings=s.xml`) or as the next argument. `fetch` refuses anything
-else, since a module it misses would deploy from build 1:
+`--settings=s.xml`) or as the next argument. `-q` passes the check, but
+`fetch` leaves it out of its own run, since it reads the project list
+from Maven's output. `fetch` refuses anything else, since a module it
+misses would deploy from build 1:
 
 - goals and phases, such as `deploy`, which would run before
-  `help:effective-pom` and publish before `fetch` seeds any metadata;
+  `help:active-profiles` and publish before `fetch` seeds any metadata;
 - project selection and reactor narrowing: `-f`, `-pl`, `-N`, `-r`,
   `-rf`, `-am`, `-amd`;
 - `-af`, which reads further, unchecked arguments from a file;
@@ -219,7 +243,7 @@ else, since a module it misses would deploy from build 1:
 
 That list is an allow-list because Maven accepts more spellings than a
 deny-list can foresee. In real runs, `-qN` and `--non-r` narrowed the
-effective POM to one module on Maven 4, and `-non-recursive` did on
+reactor to one module on Maven 4, and `-non-recursive` did on
 Maven 3 and Maven 4 alike.
 
 `fetch` checks a workflow-level `MAVEN_ARGS` against the same list and
@@ -228,8 +252,21 @@ deploy that follows honours `MAVEN_ARGS`, so `fetch` must see the
 reactor it selects: a `-P` there that adds modules would otherwise leave
 them without seeded metadata. Anything the list refuses, such as `-pl`,
 fails the step, and Maven never reads the variable unchecked from the
-environment. A project's own `.mvn/maven.config` still applies: as part
+environment. Maven's launcher expands `MAVEN_ARGS` unquoted, so the
+shell splits it and expands globs; a value holding `*`, `?` or `[`, or
+whitespace other than space, tab or newline, fails the step, since
+`fetch` can't replay it the way the deploy reads it. A project's
+own `.mvn/maven.config` still applies: as part
 of the checkout, the deploy reads it too, so both see the same reactor.
+
+The exception is a `-f` in that config. A plain `mvn deploy` builds the
+POM it selects, but a command-line `-f` overrides it, and
+[maven-build-action](https://github.com/lfreleng-actions/maven-build-action)
+always passes one. So `fetch` can't know which POM the deploy reads
+unless `pom_file` says so. Set `pom_file` to the POM the deploy builds.
+Left empty, `fetch` reads `pom.xml`, and when a `.mvn/maven.config`
+exists it also lists the reactor without `-f`, a second Maven run.
+It fails unless both runs give the same reactor.
 
 The Nexus input names match
 [nexus-publish-action](https://github.com/lfreleng-actions/nexus-publish-action),
@@ -258,9 +295,11 @@ publish step can cover artefacts outside the root `groupId` too.
 - Python 3.9 or newer as `python3`; GitHub-hosted runners ship 3.12.
   The action needs nothing beyond the standard library, and checks the
   version before it starts.
-- For `fetch`, `mvn` on `PATH` and a JDK the project builds with.
-  GitHub-hosted runners ship Maven; `actions/setup-java` provides the
-  JDK.
+- For `fetch`, Maven 3.9 or newer as `mvn` on `PATH`, and a JDK the
+  project builds with. GitHub-hosted runners ship Maven 3.9;
+  `actions/setup-java` provides the JDK. `fetch` refuses older Maven:
+  its launcher ignores `MAVEN_ARGS`, so the deploy could build a reactor
+  other than the one `fetch` seeded.
 - Egress to the Nexus server, and to whatever repositories Maven needs
   to resolve the project's parent POMs.
 
@@ -269,13 +308,16 @@ workspace cleanup, `git clean` and artefact uploads of the workspace
 leave it alone. That separation is not a security boundary, though:
 build code runs as the same user and can reach `$RUNNER_TEMP` too. Like
 `fetch` itself, `prune` trusts the build it brackets, which is why both
-belong on merged code. `fetch` marks the baseline complete as its last
-act, so `prune` refuses one that an interrupted fetch left behind.
+belong on merged code. `fetch` withdraws any earlier baseline before it
+does anything else, and marks the new one complete as its last act,
+naming the `m2repo` it seeded. `prune` refuses a baseline that a failed
+or interrupted fetch left behind, and one seeded into another `m2repo`.
 
-Maven runs without the `INPUT_*` variables this action sets for its own
-inputs. They include `nexus_password`, which Maven doesn't need and
-project extensions could otherwise read. A job's own `INPUT_*` variables
-still reach Maven, since a profile may activate on one and the deploy
+The action hands its inputs to its own step as `SNAPSHOT_METADATA_*`
+variables, and Maven runs without them. They include `nexus_password`,
+which Maven doesn't need and project extensions could otherwise read.
+Every other variable reaches Maven unchanged, a job's own `INPUT_*`
+variables included, since a profile may activate on one and the deploy
 that follows sees it too.
 
 `fetch` requires an `m2repo` with no `maven-metadata.xml` in it yet.
@@ -283,6 +325,11 @@ Leftover metadata the server no longer holds would stay out of the
 baseline, so `prune` would never judge it and it would publish
 unchanged. Artefacts already there are fine. `fetch` refuses rather
 than deletes, since it cannot tell a leftover from a file you meant.
+
+Nothing beneath the `m2repo` may be a symbolic link either, whether to
+a file or a directory, and whether its target exists or not: the deploy
+could follow one out of the tree that publishes. The `m2repo` path
+itself may be a link.
 
 ## Implementation Details
 
@@ -297,7 +344,10 @@ The workflow in `.github/workflows/testing.yaml` also runs the whole
 sequence on a real Maven deploy. It seeds `buildNumber` 41, deploys one
 module, then asserts the deploy continued at 42 and that `prune` dropped
 the untouched module's metadata. It runs on Maven 3.9, the runner's own,
-and on Maven 4.
+and on Maven 4. The same job runs the suite's real-Maven tests,
+which `RUN_MAVEN_TESTS=1` enables locally. They check that a reactor
+with an `output`-activated profile, or an `artifact` property from any
+source, still lists every module the build sees.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/maven-snapshot-metadata-action/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/maven-snapshot-metadata-action/main.svg

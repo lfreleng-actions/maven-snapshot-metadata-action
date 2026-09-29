@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -19,8 +20,14 @@ from snapshot_metadata.nexus import Fetcher
 # the hashlib algorithm each names. These are the checksums Maven's
 # resolver writes and verifies by default.
 SEEDED_CHECKSUMS = {".md5": "md5", ".sha1": "sha1"}
-# Removed alongside a pruned metadata file, whichever exist.
-PRUNED_SIBLINGS = (".md5", ".sha1", ".sha256", ".sha512", ".asc")
+# Removed alongside a pruned metadata file, whichever exist: its
+# checksums, its detached signature, and the signature's checksums.
+DIGEST_SUFFIXES = (".md5", ".sha1", ".sha256", ".sha512")
+PRUNED_SIBLINGS = (
+    *DIGEST_SUFFIXES,
+    ".asc",
+    *(f".asc{suffix}" for suffix in DIGEST_SUFFIXES),
+)
 BASELINE_MARKER = ".maven-snapshot-metadata-baseline"
 
 
@@ -31,10 +38,12 @@ def looks_like_metadata(body: bytes) -> bool:
     response also starts with a declaration. Only a ``<metadata>``
     root qualifies. The body comes from the configured server, is
     capped at MAX_BODY, and ElementTree resolves no external entities.
+    A declared encoding expat cannot use fails with LookupError or
+    ValueError, not ParseError, and is just as invalid.
     """
     try:
         root = ET.fromstring(body)
-    except ET.ParseError:
+    except (ET.ParseError, LookupError, ValueError):
         return False
     return root.tag.rsplit("}", 1)[-1] == "metadata"
 
@@ -45,14 +54,29 @@ def checksum_matches(sidecar: bytes, body: bytes, extension: str) -> bool:
     Recomputed rather than checked for shape: a well-formed but stale
     sidecar, fetched after the metadata changed on the server, would
     otherwise ship and fail Maven's verification. Some tools append a
-    filename after the digest, so only the first word counts.
+    filename after the digest, so only the first word counts. Declared
+    a non-security use: it checks Maven's legacy checksum, and a FIPS
+    build of OpenSSL refuses MD5 for anything else.
     """
     try:
         words = sidecar.decode("ascii").split()
     except UnicodeDecodeError:
         return False
-    digest = hashlib.new(SEEDED_CHECKSUMS[extension], body).hexdigest()
+    algorithm = SEEDED_CHECKSUMS[extension]
+    digest = hashlib.new(algorithm, body, usedforsecurity=False).hexdigest()
     return bool(words) and words[0].lower() == digest
+
+
+def resolve_path(path: Path) -> Path:
+    """``path.resolve()``, with a symbolic-link loop as an ActionError.
+
+    Python 3.12 and older raise RuntimeError for a loop, which would
+    escape main()'s handlers as a traceback; 3.13 resolves it as is.
+    """
+    try:
+        return path.resolve()
+    except RuntimeError as exc:
+        raise ActionError(f"{path} is in a symbolic link loop") from exc
 
 
 def safe_target(root: Path, relative: str) -> Path:
@@ -62,8 +86,8 @@ def safe_target(root: Path, relative: str) -> Path:
     against a symlinked directory the build left inside the tree.
     """
     target = root / relative
-    resolved_root = root.resolve()
-    resolved = target.resolve()
+    resolved_root = resolve_path(root)
+    resolved = resolve_path(target)
     if resolved != resolved_root and resolved_root not in resolved.parents:
         raise ActionError(f"{relative} resolves outside {root}")
     if target.is_symlink():
@@ -100,6 +124,29 @@ def _download(fetcher: Fetcher, base_url: str, relative: str) -> dict[str, bytes
     return found
 
 
+def _reraise(exc: OSError) -> None:
+    raise exc
+
+
+def _refuse_links(root: Path) -> None:
+    """Fail on the first symbolic link beneath ``root``.
+
+    os.walk lists a linked directory without entering it, so the scan
+    sees the link itself; rglob would skip it and never look inside. A
+    directory it cannot list fails the scan, rather than hiding a link.
+    """
+    for directory, dirs, files in os.walk(root, onerror=_reraise):
+        dirs.sort()
+        for name in sorted(dirs + files):
+            path = Path(directory, name)
+            if path.is_symlink():
+                raise ActionError(
+                    f"{root} holds a symbolic link at"
+                    + f" {path.relative_to(root).as_posix()}, which the deploy"
+                    + " could follow out of it; fetch needs a clean m2repo"
+                )
+
+
 def seed_metadata(
     coordinates: Iterable[Coordinate],
     base_url: str,
@@ -113,11 +160,17 @@ def seed_metadata(
     server no longer has would stay out of the baseline, so ``prune``
     would never judge it and it would publish unchanged. Refused, not
     deleted: fetch cannot tell a leftover from a file the caller meant.
+    Nor may it hold a symbolic link, to a file or a directory, dangling
+    or not: where the server has nothing, fetch writes nothing through
+    it, and the deploy would follow it out of the tree that publishes.
+    The m2repo itself may be a link; only what lies beneath it counts.
 
     The baseline marker goes in last, once every path has seeded, so an
-    interrupted fetch leaves a baseline ``prune`` refuses.
+    interrupted fetch leaves a baseline ``prune`` refuses. It names the
+    m2repo seeded, so ``prune`` also refuses to judge any other.
     """
     if m2repo.is_dir():
+        _refuse_links(resolve_path(m2repo))
         existing = sorted(
             p.relative_to(m2repo).as_posix()
             for p in m2repo.rglob(f"{METADATA}*")
@@ -146,8 +199,12 @@ def seed_metadata(
             files += 1
         if found:
             seeded.append(relative)
-    _ = (baseline / BASELINE_MARKER).write_text("fetch\n", encoding="utf-8")
+    _ = (baseline / BASELINE_MARKER).write_bytes(_marker(m2repo))
     return FetchResult(metadata=seeded, files=files)
+
+
+def _marker(m2repo: Path) -> bytes:
+    return os.fsencode(resolve_path(m2repo)) + b"\n"
 
 
 def _verify_siblings(m2repo: Path, relative: str, body: bytes) -> None:
@@ -177,9 +234,21 @@ class PruneResult:
 
 
 def prune_metadata(m2repo: Path, baseline: Path) -> PruneResult:
-    """Delete m2repo metadata still byte-identical to the baseline."""
-    if not (baseline / BASELINE_MARKER).is_file():
+    """Delete m2repo metadata still byte-identical to the baseline.
+
+    Only in the m2repo fetch seeded: anywhere else every baseline file
+    would be missing, so all would count as pruned while the seeded
+    copies went on to publish.
+    """
+    marker = baseline / BASELINE_MARKER
+    if not marker.is_file():
         raise ActionError(f"{baseline} holds no fetch baseline; run mode 'fetch' first")
+    recorded = marker.read_bytes()
+    if recorded != _marker(m2repo):
+        raise ActionError(
+            f"{baseline} was fetched into {os.fsdecode(recorded).rstrip()},"
+            + f" not {resolve_path(m2repo)}; give fetch and prune the same m2repo_path"
+        )
     removed: list[str] = []
     removed_files = 0
     for seeded in sorted(baseline.rglob(METADATA)):
