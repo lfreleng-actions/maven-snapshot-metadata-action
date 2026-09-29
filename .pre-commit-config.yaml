@@ -32,7 +32,8 @@ repos:
       - id: frozen-rev-is-a-release
         name: frozen revs name a release
         language: pygrep
-        entry: '#\s*frozen:\s+(?!v?[0-9]+(\.[0-9]+)*(-[0-9]+)?\s*$|\s)'
+        # yamllint disable-line rule:line-length
+        entry: '^[ \t]*rev:[ \t]*\S+[ \t]+#[ \t]*frozen:(?![ \t]+v?[0-9]+(\.[0-9]+)*(-[0-9]+)?[ \t]*$)'
         files: '^\.pre-commit-config\.yaml$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -144,7 +145,7 @@ repos:
       - id: eslint
         name: eslint
         # yamllint disable-line rule:line-length
-        entry: bash -c 'export GUARD_EXCLUDE="(^|/)(dist|build|coverage|node_modules)/|(^|/)eslint[.]config[.](m|c)?js$"; sh .github/hooks/manifest-guard.sh package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; rc=$?; case "$rc" in 3|4) ;; *) exit "$rc";; esac; v=$(npx --no-install eslint --version 2>/dev/null | sed "s/^v//; s/[.].*$//"); if [ -z "$v" ]; then echo "eslint not installed - add eslint >=9 to devDependencies" >&2; exit 1; fi; if [ "$v" -lt 9 ]; then echo "eslint $v cannot load a flat config reliably - upgrade to >=9" >&2; exit 1; fi; if ! git ls-files -- eslint.config.mjs | grep -q .; then echo "eslint.config.mjs is not tracked - copy it from actions-template, or ESLint would lint against a config outside this repository" >&2; exit 1; fi; { sh .github/hooks/manifest-guard.sh --list package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; printf 'eslint.config.mjs\0'; } | xargs -0 env ESLINT_USE_FLAT_CONFIG=true npx --no-install eslint --no-config-lookup --config eslint.config.mjs --fix'
+        entry: bash -c 'export GUARD_EXCLUDE="(^|/)(dist|build|coverage|node_modules)/|(^|/)eslint[.]config[.](m|c)?js$"; sh .github/hooks/manifest-guard.sh package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; rc=$?; case "$rc" in 3|4) ;; *) exit "$rc";; esac; v=$(npx --no-install eslint --version 2>/dev/null | sed "s/^v//; s/[.].*$//"); if [ -z "$v" ]; then echo "eslint not installed - add eslint >=9 to devDependencies" >&2; exit 1; fi; if [ "$v" -lt 9 ]; then echo "eslint $v cannot load a flat config reliably - upgrade to >=9" >&2; exit 1; fi; if ! git ls-files -- eslint.config.mjs | grep -q .; then echo "eslint.config.mjs is not tracked - copy it from actions-template, or ESLint would lint against a config outside this repository" >&2; exit 1; fi; { sh .github/hooks/manifest-guard.sh --list package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; printf "eslint.config.mjs\0"; } | xargs -0 env ESLINT_USE_FLAT_CONFIG=true npx --no-install eslint --no-config-lookup --config eslint.config.mjs --fix'
         language: system
         always_run: true
         pass_filenames: false
