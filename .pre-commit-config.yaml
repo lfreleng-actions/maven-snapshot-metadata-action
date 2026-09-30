@@ -4,69 +4,6 @@
 
 ci:
   autofix_prs: false
-  # pre-commit.ci sandbox prevents network calls; disable gha-workflow-linter.
-  # aislop also runs engines that can call the network at scan time
-  # (dependency audits), so it cannot run in the sandbox either.
-  #
-  # The Go hooks below use language: system and need a Go toolchain plus
-  # golangci-lint on PATH; the eslint hook needs the project's own
-  # node_modules. The sandbox provides none of these, so they are skipped
-  # here.
-  #
-  # They remain inert in repositories without Go or JavaScript, all five
-  # using the same pattern: always_run, so a commit deleting sources
-  # still triggers them, with an early guard on the project manifest.
-  #
-  # The decision lives in .github/hooks/manifest-guard.sh, shared by all
-  # five hooks rather than repeated as five copies of dense shell. It
-  # returns 3 when a root manifest is tracked and owns at least one
-  # source, 4 when a root manifest is tracked but owns none, 0 when the
-  # hook is inert, and 1 when the state is broken.
-  #
-  # The hooks below disagree deliberately about 4, so it is not a
-  # synonym for either neighbour. go mod tidy and ESLint still run:
-  # tidy is precisely what reconciles the requirements left behind when
-  # the last source goes, and ESLint is handed the config so a
-  # config-only change stays validated. go format, go vet and
-  # golangci-lint run skip, because there is nothing for them to act on
-  # and the last two exit non-zero on a module with no packages, which
-  # would block the commit that removes the final Go file.
-  #
-  # Every test is against the git index, not the filesystem, because a
-  # pre-commit hook validates what is being committed. An untracked
-  # manifest sitting on disk must not satisfy the guard, or a commit
-  # carrying sources but not their manifest passes locally and lands a
-  # tree nobody else can build.
-  #
-  # Coverage is decided per source file, not by asking whether a nested
-  # manifest exists somewhere. A repository can hold both a nested
-  # module and sources outside it, and treating one nested manifest as
-  # blanket permission would let deletion of the root manifest pass
-  # while those orphaned sources went unlinted. The guard names the
-  # first uncovered file, so the error says which source has no
-  # manifest rather than merely that one is missing.
-  #
-  # Nested layouts are therefore left uncovered rather than rejected,
-  # which is a deliberate gap. 'go vet ./...' and a root ESLint run
-  # cannot lint a tree whose manifest lives elsewhere, so the honest
-  # choice was between skipping and failing, and failing would block
-  # valid projects on a message telling them to restore a file they
-  # never deleted.
-  #
-  # A 'files' matcher would look equivalent and be materially weaker:
-  # pre-commit drops deleted paths before matching, so a commit that only
-  # removes sources would run nothing at all.
-  #
-  # Note that skipping them leaves these checks developer-side only. No
-  # reusable workflow currently runs them: go-audit-action covers
-  # govulncheck, gosec and staticcheck, which is a security audit rather
-  # than a lint, and of the organisation's Go repositories only
-  # version-extract-action invokes anything equivalent from a workflow.
-  # Server-side enforcement for hooks the sandbox cannot run is tracked in
-  # lfreleng-actions/.github#179, which proposes a generic-workflows
-  # linting workflow that installs project dependencies first. Until that
-  # lands, treat this list as a known enforcement gap and not as a
-  # delegation to some workflow that already exists.
   skip:
     - gha-workflow-linter
     - aislop
@@ -84,48 +21,19 @@ ci:
 
     Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
 
-# gitlint declares stages: [commit-msg]; without installing that hook
-# type it never runs. Hooks that declare no stage would otherwise run
-# again at commit-msg, so confine them to pre-commit.
 default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]
 
 exclude: "^docs/conf.py"
 
 repos:
-  # Guard the pins below before any of them run.
-  #
-  # 'pre-commit autoupdate' resolves each repo to its newest tag with no
-  # semantic-version filtering, so a maintainer who pushes a non-release
-  # tag drags every downstream consumer off the release they pinned.
-  # Nothing else here notices: the resulting SHA checks out cleanly, so
-  # every hook still passes and CI stays green. kjanat/actionlint did
-  # exactly this on 2026-09-14, a day after v1.17.0.
-  #
-  # A '# frozen:' label records the ref --freeze resolved, so the whole
-  # label is matched against the shape a release takes: optional 'v',
-  # dot-separated digits, optional numeric revision. That accepts every
-  # form in use here, '0.38.0' and 'v0.11.0.1-1' included, and rejects
-  # word-shaped refs whatever they start with, so 'v1-experiment' and
-  # '2026-research' fail rather than sneaking past a prefix check.
-  #
-  # Pre-release labels such as 'v2.0.0-rc1' are rejected too: nothing
-  # distinguishes '-rc1' from '-experiment' lexically, and adopting a
-  # release candidate unnoticed is the failure this hook exists to stop.
-  #
-  # The trailing '|\s' alternative stops the whitespace quantifier
-  # backtracking onto the separator and flagging a valid label.
-  #
-  # pygrep needs no toolchain and no network, so this runs in the
-  # pre-commit.ci sandbox and stays out of ci.skip. Proving a SHA is a
-  # commit and not a tag object needs the network, so it cannot join in.
   - repo: local
     hooks:
       - id: frozen-rev-is-a-release
         name: frozen revs name a release
         language: pygrep
         # yamllint disable-line rule:line-length
-        entry: '#\s*frozen:\s+(?!v?[0-9]+(\.[0-9]+)*(-[0-9]+)?\s*$|\s)'
+        entry: '^[ \t]*rev:[ \t]*\S+[ \t]+#[ \t]*frozen:(?![ \t]+v?[0-9]+(\.[0-9]+)*(-[0-9]+)?[ \t]*$)'
         files: '^\.pre-commit-config\.yaml$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -151,15 +59,6 @@ repos:
           - --branch=rc
           - --branch=production
 
-  # Block credentials before they reach a commit. Scans staged content
-  # rather than paths, so it also catches secrets in files that no
-  # .gitignore rule covers. Guards new commits only; it does not scan
-  # existing history.
-  #
-  # always_run is required: the hook reads the staged index directly, but
-  # pre-commit still gates invocation on the file classifier, so the
-  # top-level exclude above would otherwise skip scanning entirely on a
-  # commit that touches only excluded paths.
   - repo: https://github.com/gitleaks/gitleaks
     rev: 2ca41cc1372d1e939a6a879f18cdc19fc1cac1ce  # frozen: v8.30.0
     hooks:
@@ -211,44 +110,16 @@ repos:
     hooks:
       - id: reuse
 
-  # Actively maintained fork of https://github.com/rhysd/actionlint
-  # Unlike upstream v1.7.12, this fork understands GitHub's
-  # self-repository 'uses: $/{path}' syntax, so it no longer conflicts
-  # with zizmor's self-repository audit. A bare '$/' (an action at the
-  # repository root) is still rejected; .github/actionlint.yaml carries
-  # a path-scoped ignore for that case.
-  #
-  # The '-shellcheck' variant, not the plain 'actionlint' hook. Both run
-  # the same linter; they differ only in where the ShellCheck used for
-  # 'run:' blocks comes from. The plain hook builds into an isolated
-  # GOPATH and picks up ShellCheck only if one already happens to be on
-  # PATH, which made the check environment-dependent: a contributor with
-  # ShellCheck installed saw findings that pre-commit.ci, whose
-  # shellcheck-py hook lives in its own isolated environment, did not.
-  # CI was the more permissive of the two, which is the wrong way round.
-  # This variant supplies its own Go build of ShellCheck, so 'run:'
-  # blocks are checked identically everywhere.
-  #
-  # It does not replace the shellcheck-py hook above: that covers '.sh'
-  # files, this covers shell embedded in workflows. The two carry
-  # separate ShellCheck versions, so a finding may appear under one
-  # before the other.
-  #
-  # Not added to ci.skip: language: golang is supported on pre-commit.ci,
-  # which builds a 'golang@system' environment for the gitleaks hook
-  # above in the same way.
   - repo: https://github.com/kjanat/actionlint
     rev: 2da2ceb4af2c7ecc48f5b9311d85080c3971b5f0  # frozen: v1.17.0
     hooks:
       - id: actionlint-shellcheck
 
-  # Check for misspellings in documentation files
   - repo: https://github.com/codespell-project/codespell
     rev: 57b21406f092110c18776e39b0bda50d37c945c8  # frozen: v2.4.3
     hooks:
       - id: codespell
 
-  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror
     rev: 706e6acebe9e88c2c28d1527d3085a14b11794c4  # frozen: 1.40.1
     hooks:
@@ -259,13 +130,6 @@ repos:
     hooks:
       - id: gha-workflow-linter
 
-  # Catch AI slop developer-side before it reaches a pull request.
-  # Runs the full-repository quality gate, scored against
-  # .aislop/config.yml (failBelow: 100). A local hook installing the
-  # published npm package: the scanaislop/aislop git repository does
-  # not ship the built dist/, so its bundled pre-commit hook cannot
-  # install. Bump the pinned version here manually when new aislop
-  # releases ship.
   - repo: local
     hooks:
       - id: aislop
@@ -276,126 +140,20 @@ repos:
         pass_filenames: false
         always_run: true
 
-  # JavaScript/TypeScript linting.
-  #
-  # Repository-wide with a package.json guard, mirroring the Go hooks
-  # below, rather than scoped by 'files'. The guard fails when the
-  # manifest is absent but lintable sources are still tracked, so
-  # deleting package.json cannot silently disable linting; the shipped
-  # config and ESLint's generated paths are excluded from that check so
-  # this template, whose only tracked JavaScript file is the seed config,
-  # stays inert.
-  #
-  # eslint.config.mjs is deliberately not hidden from the hook. Where a
-  # root package.json is tracked, linting the repository loads the
-  # config, so a syntax error, missing plugin or invalid rule fails on
-  # the commit that introduces it rather than surviving until the next
-  # source change.
-  #
-  # That does not hold in this template, and the distinction matters.
-  # GUARD_EXCLUDE omits the seed config from the guard's source check,
-  # so a repository whose only matching file is that config has no
-  # tracked manifest and no countable sources, and the hook exits 0
-  # without running ESLint. Editing the seed config here is therefore
-  # unvalidated; the guarantee begins at adoption, once the adopting
-  # repository tracks a package.json.
-  #
-  # A local hook rather than pre-commit/mirrors-eslint. The mirror installs
-  # plugins into an isolated environment, and a flat config at the
-  # repository root cannot resolve ESM imports from it -- 'Cannot find
-  # package typescript-eslint' -- because flat config resolves plugins
-  # relative to itself. Running the project's own ESLint keeps plugin
-  # resolution working and keeps versions declared once, in package.json,
-  # instead of duplicated here.
-  #
-  # Consequently this needs node_modules present, which the pre-commit.ci
-  # sandbox does not install, so it appears in the ci.skip list above.
   - repo: local
     hooks:
       - id: eslint
         name: eslint
-        # Guards the ESLint major version before linting. 'npx
-        # --no-install' runs whatever the repository already depends on,
-        # and flat config is only the default from ESLint 9 onwards. On
-        # ESLint 8 -- still pinned in release-assets-action -- this config
-        # would be ignored silently in favour of a legacy .eslintrc, so
-        # the baseline would appear to be enforced while doing nothing.
-        # Fail loudly instead.
-        #
-        # ESLINT_USE_FLAT_CONFIG is forced to true for the invocation
-        # rather than left to the environment. ESLint 9 still honours a
-        # value of false by reverting to .eslintrc loading, so an ambient
-        # setting inherited from a shell or CI image could otherwise
-        # bypass this baseline while the hook reported success.
-        #
-        # There is no escape hatch for ESLint 8. It would have to be
-        # bounded to 8.57 and newer, because 8.0 to 8.56 cannot discover
-        # an eslint.config.mjs filename and 7 has no flat config at all,
-        # and encoding that range here means parsing minor versions in an
-        # already dense shell fragment. ESLint 8 is end-of-life and the
-        # rollout upgrades the one repository still on it, so requiring 9
-        # removes the whole class of partial support instead.
-        # The config is pinned and lookup disabled. Flat-config
-        # discovery walks UP the directory tree, so a repository that
-        # has package.json but no config of its own lints against
-        # whatever config sits above it, outside the checkout.
-        # Confirmed: a parent-directory config banning 'debugger'
-        # reported no-debugger against a repository containing no
-        # ESLint configuration at all.
-        #
-        # A missing config is caught before ESLint runs, because
-        # --config on an absent file raises a filesystem stack trace
-        # rather than an actionable message.
         # yamllint disable-line rule:line-length
-        entry: bash -c 'export GUARD_EXCLUDE="(^|/)(dist|build|coverage|node_modules)/|(^|/)eslint[.]config[.](m|c)?js$"; sh .github/hooks/manifest-guard.sh package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; rc=$?; case "$rc" in 3|4) ;; *) exit "$rc";; esac; v=$(npx --no-install eslint --version 2>/dev/null | sed "s/^v//; s/[.].*$//"); if [ -z "$v" ]; then echo "eslint not installed - add eslint >=9 to devDependencies" >&2; exit 1; fi; if [ "$v" -lt 9 ]; then echo "eslint $v cannot load a flat config reliably - upgrade to >=9" >&2; exit 1; fi; if ! git ls-files -- eslint.config.mjs | grep -q .; then echo "eslint.config.mjs is not tracked - copy it from actions-template, or ESLint would lint against a config outside this repository" >&2; exit 1; fi; { sh .github/hooks/manifest-guard.sh --list package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; printf 'eslint.config.mjs\0'; } | xargs -0 env ESLINT_USE_FLAT_CONFIG=true npx --no-install eslint --no-config-lookup --config eslint.config.mjs --fix'
+        entry: bash -c 'export GUARD_EXCLUDE="(^|/)(dist|build|coverage|node_modules)/|(^|/)eslint[.]config[.](m|c)?js$"; sh .github/hooks/manifest-guard.sh package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; rc=$?; case "$rc" in 3|4) ;; *) exit "$rc";; esac; v=$(npx --no-install eslint --version 2>/dev/null | sed "s/^v//; s/[.].*$//"); if [ -z "$v" ]; then echo "eslint not installed - add eslint >=9 to devDependencies" >&2; exit 1; fi; if [ "$v" -lt 9 ]; then echo "eslint $v cannot load a flat config reliably - upgrade to >=9" >&2; exit 1; fi; if ! git ls-files -- eslint.config.mjs | grep -q .; then echo "eslint.config.mjs is not tracked - copy it from actions-template, or ESLint would lint against a config outside this repository" >&2; exit 1; fi; { sh .github/hooks/manifest-guard.sh --list package.json "*.js" "*.jsx" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.mts" "*.cts"; printf "eslint.config.mjs\0"; } | xargs -0 env ESLINT_USE_FLAT_CONFIG=true npx --no-install eslint --no-config-lookup --config eslint.config.mjs --fix'
         language: system
         always_run: true
         pass_filenames: false
 
-  # Go toolchain checks.
-  #
-  # These are repository-wide rather than per-file, so they use
-  # always_run with a go.mod guard instead of a 'files' matcher. A
-  # 'files' matcher looks equivalent but silently misses the case that
-  # matters most: pre-commit drops deleted paths before matching, so a
-  # commit that only removes .go files would skip every check here and
-  # could leave stale module requirements or broken packages behind.
-  #
-  # The guard keys on go.mod, which is the honest test of "is this a Go
-  # project". Without a tracked root go.mod it does not simply exit 0:
-  # it exits 0 only when every tracked Go source sits under a module in
-  # a subdirectory, or when there are no Go sources at all. A tracked
-  # source that no module covers FAILS, which is the safeguard that
-  # catches a deleted or unstaged go.mod, so the toolchain stays
-  # unrequired for non-Go repositories without the deletion case
-  # falling silent.
-  #
-  # Order is deliberate and each step depends on the one before:
-  #   fmt   -- goimports adds and removes imports, changing what the
-  #            module graph needs
-  #   tidy  -- reconciles go.mod/go.sum with the imports fmt settled on
-  #   vet   -- analysis against a synchronised module graph
-  #   lint  -- golangci-lint last, seeing formatted, tidied sources
-  # Reordering these makes the run fail on its first pass and only
-  # succeed when repeated.
-  #
-  # language: system is deliberate. Pinning a Go toolchain per hook would
-  # duplicate the version already declared in go.mod and drift from it;
-  # using the installed toolchain keeps one source of truth. The cost is
-  # that these cannot run in the pre-commit.ci sandbox, hence the ci.skip
-  # entries above.
-  #
-  # golangci-lint fails loudly when absent rather than passing silently: a
-  # linter that quietly does nothing is worse than one that is missing.
   - repo: local
     hooks:
       - id: go-fmt
         name: go format (gofmt + goimports)
-        # 'golangci-lint run' reports formatter differences but does not
-        # apply them; 'fmt' applies every formatter enabled in
-        # .golangci.yml. Running plain gofmt here would leave goimports
-        # differences unfixed and fail the lint hook below with nothing
-        # able to correct them.
         # yamllint disable-line rule:line-length
         entry: bash -c 'sh .github/hooks/manifest-guard.sh go.mod "*.go"; rc=$?; case "$rc" in 3) ;; 4) exit 0;; *) exit "$rc";; esac; command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed - see https://golangci-lint.run/welcome/install/" >&2; exit 1; }; sh .github/hooks/manifest-guard.sh --list go.mod "*.go" | xargs -0 golangci-lint fmt'
         language: system
