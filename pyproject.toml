@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Tool configuration only. This repository is a GitHub Action, not a
+# Python package: there is no [project] table, and nothing builds or
+# installs it.
+
+[tool.basedpyright]
+# The floor action.yaml enforces, and the oldest interpreter the
+# unit-test matrix runs.
+pythonVersion = "3.9"
+pythonPlatform = "All"
+# basedpyright's own default, kept explicit. The code already passes
+# it, and it is stricter than the organisation's "standard" baseline.
+typeCheckingMode = "recommended"
+# The directories the pre-commit hook passes as explicit targets.
+# Explicit arguments override include, so this governs the runs that
+# name no targets, a bare basedpyright and an editor's language
+# server, which then analyse the same set the hook does.
+include = ["src", "tests"]
+# Resolve imports the way the code runs: the action and the unit tests
+# put src on PYTHONPATH, and the tests import the tests package from
+# the repository root.
+extraPaths = ["src", "."]
