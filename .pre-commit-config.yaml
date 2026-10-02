@@ -120,10 +120,19 @@ repos:
     hooks:
       - id: codespell
 
+  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror
     rev: 706e6acebe9e88c2c28d1527d3085a14b11794c4  # frozen: 1.40.1
     hooks:
       - id: basedpyright
+        # Fail on warnings too, the same diagnostics an editor shows
+        args: [--warnings, src, tests]
+        # Analyse the whole scope above, not just the staged files
+        pass_filenames: false
+        # Run even when nothing staged is Python, e.g. a deletion
+        always_run: true
+        # Stop always_run from running it again at commit-msg
+        stages: [pre-commit]
 
   - repo: https://github.com/lfreleng-actions/gha-workflow-linter
     rev: 0c582e431022f1c7004196fb4ea32744d1fe4843  # frozen: v1.7.0
