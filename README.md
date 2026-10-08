@@ -296,7 +296,7 @@ publish step can cover artefacts outside the root `groupId` too.
   The action needs nothing beyond the standard library, and checks the
   version before it starts.
 - For `fetch`, Maven 3.9 or newer as `mvn` on `PATH`, and a JDK the
-  project builds with. GitHub-hosted runners ship Maven 3.9;
+  project builds with. GitHub-hosted runners ship a recent Maven;
   `actions/setup-java` provides the JDK. `fetch` refuses older Maven:
   its launcher ignores `MAVEN_ARGS`, so the deploy could build a reactor
   other than the one `fetch` seeded.
@@ -343,8 +343,9 @@ during the build.
 The workflow in `.github/workflows/testing.yaml` also runs the whole
 sequence on a real Maven deploy. It seeds `buildNumber` 41, deploys one
 module, then asserts the deploy continued at 42 and that `prune` dropped
-the untouched module's metadata. It runs on Maven 3.9, the runner's own,
-and on Maven 4. The same job runs the suite's real-Maven tests,
+the untouched module's metadata. It runs on Maven 3.9, the oldest
+`fetch` accepts, and on Maven 4, each a pinned release it installs
+itself. The same job runs the suite's real-Maven tests,
 which `RUN_MAVEN_TESTS=1` enables locally. They check that a reactor
 with an `output`-activated profile, or an `artifact` property from any
 source, still lists every module the build sees.
