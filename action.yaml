@@ -81,6 +81,11 @@ inputs:
     description: "Baseline written by fetch; defaults to its location"
     required: false
     default: ""
+  check_coordinates:
+    # yamllint disable-line rule:line-length
+    description: "Fail on SNAPSHOTs or metadata of modules fetch did not record: 'true' or 'false'"
+    required: false
+    default: "true"
 
 outputs:
   module_count:
@@ -95,6 +100,9 @@ outputs:
   baseline_path:
     description: "Where fetch kept the pristine metadata"
     value: ${{ steps.run.outputs.baseline_path }}
+  coordinates_path:
+    description: "JSON record of the reactor modules fetch read"
+    value: ${{ steps.run.outputs.coordinates_path }}
   removed_count:
     description: "Unchanged metadata files prune removed"
     value: ${{ steps.run.outputs.removed_count }}
@@ -123,6 +131,7 @@ runs:
         SNAPSHOT_METADATA_RETRY_DELAY: ${{ inputs.retry_delay }}
         SNAPSHOT_METADATA_M2REPO_PATH: ${{ inputs.m2repo_path }}
         SNAPSHOT_METADATA_BASELINE_PATH: ${{ inputs.baseline_path }}
+        SNAPSHOT_METADATA_CHECK_COORDINATES: ${{ inputs.check_coordinates }}
       run: |
         # SNAPSHOT metadata
         set -euo pipefail

@@ -31,8 +31,8 @@ This action handles both, in two modes that bracket the build:
 
 | Mode    | Runs          | Does                                             |
 | ------- | ------------- | ------------------------------------------------ |
-| `fetch` | Before deploy | Seeds published metadata; keeps a baseline copy  |
-| `prune` | After deploy  | Deletes metadata the deploy left unchanged       |
+| `fetch` | Before deploy | Seeds published metadata; records the reactor    |
+| `prune` | After deploy  | Refuses unrecorded modules; drops unchanged ones |
 
 global-jjb has always paired `maven-fetch-metadata.sh` with its deploy
 for the same reason; this is that behaviour as a reusable, tested
@@ -178,6 +178,42 @@ points. Set
 `nexus_server` to the canonical `https` URL. For the same reason the
 action connects directly and ignores `HTTPS_PROXY`.
 
+## What prune refuses
+
+`fetch` records every module it read in a JSON file beside the
+baseline, one object per module with its `groupId`, `artifactId`,
+`version` and `packaging`, and reports its path as `coordinates_path`.
+Before `prune` removes anything, it checks the `m2repo` against that
+record, and fails naming whatever belongs to a module `fetch` never
+read:
+
+- a SNAPSHOT version directory, `<group>/<artifact>/<version>/`,
+  named as `groupId:artifactId:version`;
+- artifact-level `<group>/<artifact>/maven-metadata.xml`, or a
+  group-level `<group>/maven-metadata.xml` plugin index, that no
+  recorded module deploys.
+
+Maven can deploy more than the reactor lists. A POM can bind
+`maven-deploy-plugin:deploy-file` to `deploy`, and other plugins
+deploy artefacts of their own. `fetch` seeded no metadata for those, so
+the deploy numbered them from build 1, and publishing them would
+replace what Nexus serves. They often share the reactor's own groupId,
+which hides them from a check on `group_paths` alone.
+
+Everything a recorded module deploys passes: attached artefacts such as
+`-sources.jar` and `-tests.jar`, other extensions such as `.module`,
+checksums and signatures, its artifact-level metadata, and for a
+`maven-plugin` module its group's plugin index. The check skips release
+version directories, but not their artifact-level metadata. `prune` also
+refuses a release deployed beneath metadata a recorded module owns,
+since its deploy rewrites that file: Maven's layout lets one path be both
+a recorded SNAPSHOT's version metadata and a release's version list.
+
+To publish such modules anyway, accepting that their history restarts,
+set `check_coordinates` to `false`. A baseline from a `fetch` that
+predates the record holds none, and `prune` refuses it while the check
+is on.
+
 ## Inputs
 
 <!-- markdownlint-disable MD013 -->
@@ -198,6 +234,7 @@ action connects directly and ignores `HTTPS_PROXY`.
 | retry_delay         | False    | `2`                        | Seconds before the first retry, doubling, 0 to 60                       |
 | m2repo_path         | False    | `$GITHUB_WORKSPACE/m2repo` | Local deploy repository, within the workspace                           |
 | baseline_path       | False    | fetch's location           | Baseline written by `fetch`, if it moved                                |
+| check_coordinates   | False    | `true`                     | `prune` fails on modules `fetch` did not record; `true` or `false`      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -211,7 +248,8 @@ since the deploy there started without the published metadata.
 passes: its profiles, properties and settings files. `fetch` can't see
 the deploy's options, so an option given to one run but not the other can
 resolve different modules or versions, and a module `fetch` never saw
-deploys from build 1.
+deploys from build 1. `prune` refuses such a module unless
+`check_coordinates` is `false`.
 
 `maven_args` splits on whitespace without a shell, and accepts the
 options that shape how the reactor resolves, and nothing else:
@@ -276,14 +314,15 @@ which lets a lane pass the same values to both.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name           | Mode  | Description                                                   |
-| -------------- | ----- | ------------------------------------------------------------- |
-| module_count   | fetch | Reactor modules read                                          |
-| metadata_count | fetch | Metadata files seeded, excluding checksums                    |
-| group_paths    | fetch | Space-separated top-level group paths, e.g. `org/example`     |
-| baseline_path  | fetch | Where fetch keeps the pristine metadata                       |
-| removed_count  | prune | Unchanged metadata files removed                              |
-| kept_count     | prune | Metadata files left in the m2repo to publish                  |
+| Name             | Mode  | Description                                                 |
+| ---------------- | ----- | ----------------------------------------------------------- |
+| module_count     | fetch | Reactor modules read                                        |
+| metadata_count   | fetch | Metadata files seeded, excluding checksums                  |
+| group_paths      | fetch | Space-separated top-level group paths, e.g. `org/example`   |
+| baseline_path    | fetch | Where fetch keeps the pristine metadata                     |
+| coordinates_path | fetch | JSON record of the modules fetch read, which `prune` checks |
+| removed_count    | prune | Unchanged metadata files removed                            |
+| kept_count       | prune | Metadata files left in the m2repo to publish                |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -345,7 +384,10 @@ sequence on a real Maven deploy. It seeds `buildNumber` 41, deploys one
 module, then asserts the deploy continued at 42 and that `prune` dropped
 the untouched module's metadata. It runs on Maven 3.9, the oldest
 `fetch` accepts, and on Maven 4, each a pinned release it installs
-itself. The same job runs the suite's real-Maven tests,
+itself. It then deploys `tests/fixtures/deploy-file`, whose POM binds
+`deploy-file` to `deploy` to write a coordinate the reactor never
+lists, and asserts that `prune` refuses it by name. The same job runs
+the suite's real-Maven tests,
 which `RUN_MAVEN_TESTS=1` enables locally. They check that a reactor
 with an `output`-activated profile, or an `artifact` property from any
 source, still lists every module the build sees.

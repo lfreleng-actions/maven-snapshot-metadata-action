@@ -1276,7 +1276,6 @@ class TestPrune(NexusTestCase):
             self.m2repo, f"{GROUP}/extra/maven-metadata.xml", ARTIFACT_METADATA
         )
 
-    @unittest.expectedFailure
     def test_fetch_records_the_reactor_it_read(self) -> None:
         _ = self.seed([coordinate("tool", "maven-plugin"), coordinate()])
         self.assertEqual(
@@ -1284,7 +1283,6 @@ class TestPrune(NexusTestCase):
             [record(), record("tool", "maven-plugin")],
         )
 
-    @unittest.expectedFailure
     def test_an_extra_coordinate_inside_a_known_group_fails(self) -> None:
         # Its metadata was never seeded, so the deploy numbered it from 1;
         # published, it would roll back whatever Nexus serves for it
@@ -1337,21 +1335,18 @@ class TestPrune(NexusTestCase):
         result = prune_metadata(self.m2repo, self.baseline)
         self.assertEqual(result.kept, 3)
 
-    @unittest.expectedFailure
     def test_a_group_index_no_recorded_plugin_owns_fails(self) -> None:
         self.fetch_core()
         _ = self.write(self.m2repo, f"{GROUP}/maven-metadata.xml", ARTIFACT_METADATA)
         with self.assertRaisesRegex(ActionError, f"{GROUP}/maven-metadata.xml"):
             _ = prune_metadata(self.m2repo, self.baseline)
 
-    @unittest.expectedFailure
     def test_a_baseline_without_a_coordinates_record_fails(self) -> None:
         self.fetch_core()
         (self.baseline / COORDINATES_RECORD).unlink()
         with self.assertRaisesRegex(ActionError, "no record of the reactor"):
             _ = prune_metadata(self.m2repo, self.baseline)
 
-    @unittest.expectedFailure
     def test_a_malformed_coordinates_record_fails(self) -> None:
         self.fetch_core()
         path = self.baseline / COORDINATES_RECORD
@@ -1395,7 +1390,6 @@ class TestPrune(NexusTestCase):
                 result = prune_metadata(self.m2repo, self.baseline)
                 self.assertEqual(result.kept, 2)
 
-    @unittest.expectedFailure
     def test_a_version_directory_colliding_with_a_recorded_artifact_fails(
         self,
     ) -> None:
@@ -1417,7 +1411,6 @@ class TestPrune(NexusTestCase):
         with self.assertRaisesRegex(ActionError, "SNAPSHOT org:foo:bar-SNAPSHOT"):
             _ = prune_metadata(self.m2repo, self.baseline)
 
-    @unittest.expectedFailure
     def test_a_release_sharing_recorded_metadata_fails(self) -> None:
         # One path, two roles: a recorded SNAPSHOT's version metadata, or
         # a recorded plugin's group index, is also the artifact metadata
@@ -1454,7 +1447,6 @@ class TestPrune(NexusTestCase):
         result = prune_metadata(self.m2repo, self.baseline)
         self.assertEqual(result.kept, 1)
 
-    @unittest.expectedFailure
     def test_an_orphaned_metadata_sidecar_no_module_owns_fails(self) -> None:
         # Without its XML, a checksum or signature would still publish
         # over the server's own, so it is judged like the metadata
@@ -1465,7 +1457,6 @@ class TestPrune(NexusTestCase):
         with self.assertRaisesRegex(ActionError, f"metadata {orphan}\\.asc[,.] "):
             _ = prune_metadata(self.m2repo, self.baseline)
 
-    @unittest.expectedFailure
     def test_unrecorded_names_ending_in_snapshot_name_their_coordinate(
         self,
     ) -> None:
@@ -1506,7 +1497,6 @@ class TestPrune(NexusTestCase):
         result = prune_metadata(self.m2repo, self.baseline)
         self.assertEqual(result.removed, [])
 
-    @unittest.expectedFailure
     def test_an_unrecorded_linked_snapshot_directory_is_reported(self) -> None:
         # Not entered, so its contents cannot clear it
         self.fetch_core()
@@ -1516,7 +1506,6 @@ class TestPrune(NexusTestCase):
         with self.assertRaisesRegex(ActionError, "SNAPSHOT org:example:other-SNAPSHOT"):
             _ = prune_metadata(self.m2repo, self.baseline)
 
-    @unittest.expectedFailure
     def test_a_version_directory_too_shallow_for_a_coordinate_fails(self) -> None:
         # Named by its path, since it holds no group or no artifact
         self.fetch_core()
@@ -1665,14 +1654,12 @@ class TestEntryPoint(FakeMavenTestCase):
     def test_an_unknown_mode_is_an_error(self) -> None:
         self.assert_clean_error("mode must be", mode="publish")
 
-    @unittest.expectedFailure
     def test_check_coordinates_takes_true_or_false(self) -> None:
         _ = self.complete_fetch()
         self.assert_clean_error(
             "check_coordinates must be", mode="prune", check_coordinates="yes"
         )
 
-    @unittest.expectedFailure
     def test_prune_refuses_a_coordinate_fetch_did_not_record(self) -> None:
         nexus = MockNexus(root=self.tmp / "server").start()
         self.addCleanup(nexus.stop)
