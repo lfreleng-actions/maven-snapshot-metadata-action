@@ -96,15 +96,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the runner image's own; 4 parses long options with
-        # partial matching and differs in ways the checks depend on
-        maven: ["3.9", "4"]
-    env:
-      MAVEN4_VERSION: "4.0.0-rc-7"
-      # Pinned rather than fetched beside the tarball, where it would
-      # prove only that the download completed. Matches Apache's dist.
-      # yamllint disable-line rule:line-length
-      MAVEN4_SHA512: "17b886c0ffb7ec225e514afa8179b3143d855d196cfbb4607ece6272a9b4f51501a389438ab6841b393a4b1391a1b714f07f450daba1951f53f732b400338184"
+        # 3.9 is the floor fetch enforces; 4 parses long options with
+        # partial matching and differs in ways the checks depend on.
+        # Both are installed rather than taken from the runner image,
+        # whose Maven moves on without notice. Each digest is pinned
+        # rather than fetched beside the tarball, where it would prove
+        # only that the download completed, and matches Apache's dist.
+        include:
+          - maven: "3.9"
+            version: "3.9.16"
+            # yamllint disable-line rule:line-length
+            sha512: "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6"
+          - maven: "4"
+            version: "4.0.0-rc-7"
+            # yamllint disable-line rule:line-length
+            sha512: "17b886c0ffb7ec225e514afa8179b3143d855d196cfbb4607ece6272a9b4f51501a389438ab6841b393a4b1391a1b714f07f450daba1951f53f732b400338184"
     steps:
       # yamllint disable-line rule:line-length
       - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
@@ -139,17 +145,19 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: "Install Maven 4"
-        if: matrix.maven == '4'
+      - name: "Install Maven ${{ matrix.version }}"
         shell: bash
+        env:
+          MAVEN_VERSION: ${{ matrix.version }}
+          MAVEN_SHA512: ${{ matrix.sha512 }}
         run: |
           set -euo pipefail
-          name="apache-maven-${MAVEN4_VERSION}"
+          name="apache-maven-${MAVEN_VERSION}"
           base="https://repo1.maven.org/maven2/org/apache/maven/apache-maven"
           archive="${RUNNER_TEMP}/${name}-bin.tar.gz"
           curl -sfSL -o "${archive}" \
-            "${base}/${MAVEN4_VERSION}/${name}-bin.tar.gz"
-          echo "${MAVEN4_SHA512}  ${archive}" | sha512sum -c -
+            "${base}/${MAVEN_VERSION}/${name}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/${name}/bin" >> "${GITHUB_PATH}"
 
