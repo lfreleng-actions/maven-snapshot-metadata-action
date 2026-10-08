@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import http.client
 import io
+import json
 import os
 import pathlib
 import re
@@ -20,6 +21,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from snapshot_metadata import ActionError, cli
@@ -54,6 +56,10 @@ from tests.mock_nexus import MockNexus
 GROUP = "org/example"
 CORE = f"{GROUP}/core"
 CORE_V = f"{CORE}/1.0.0-SNAPSHOT"
+# A coordinate outside the reactor, as a POM-bound deploy-file writes it
+EXTRA_V = f"{GROUP}/extra/1.0.0-SNAPSHOT"
+# Where fetch records the reactor it read, beside the baseline marker
+COORDINATES_RECORD = ".maven-snapshot-metadata-coordinates.json"
 
 
 def digest(body: bytes, algorithm: str) -> bytes:
@@ -84,6 +90,36 @@ ARTIFACT_METADATA = b'<?xml version="1.0"?><metadata><versioning/></metadata>\n'
 
 def coordinate(artifact: str = "core", packaging: str = "jar") -> Coordinate:
     return Coordinate("org.example", artifact, "1.0.0-SNAPSHOT", packaging)
+
+
+def record(artifact: str = "core", packaging: str = "jar") -> dict[str, str]:
+    """One module as fetch records it."""
+    return {
+        "groupId": "org.example",
+        "artifactId": artifact,
+        "version": "1.0.0-SNAPSHOT",
+        "packaging": packaging,
+    }
+
+
+def read_json(path: Path) -> object:
+    """A JSON file, parsed for the assertions to compare."""
+    return cast(object, json.loads(path.read_text(encoding="utf-8")))
+
+
+def read_outputs(path: Path) -> dict[str, str]:
+    """Step outputs, as write_outputs appends them to GITHUB_OUTPUT."""
+    values: dict[str, str] = {}
+    lines = iter(path.read_text(encoding="utf-8").splitlines())
+    for line in lines:
+        key, _, delimiter = line.partition("<<")
+        value: list[str] = []
+        for item in lines:
+            if item == delimiter:
+                break
+            value.append(item)
+        values[key] = "\n".join(value)
+    return values
 
 
 class TempTestCase(unittest.TestCase):
@@ -1230,6 +1266,257 @@ class TestPrune(NexusTestCase):
         result = prune_metadata(alias, self.baseline)
         self.assertEqual(len(result.removed), 2)
 
+    def deploy_extra(self) -> None:
+        """What a POM-bound deploy-file writes: a coordinate fetch never saw."""
+        _ = self.write(
+            self.m2repo, f"{EXTRA_V}/extra-1.0.0-20260925.120000-1.jar", b"jar"
+        )
+        _ = self.write(self.m2repo, f"{EXTRA_V}/maven-metadata.xml", metadata(1))
+        _ = self.write(
+            self.m2repo, f"{GROUP}/extra/maven-metadata.xml", ARTIFACT_METADATA
+        )
+
+    def test_fetch_records_the_reactor_it_read(self) -> None:
+        _ = self.seed([coordinate("tool", "maven-plugin"), coordinate()])
+        self.assertEqual(
+            read_json(self.baseline / COORDINATES_RECORD),
+            [record(), record("tool", "maven-plugin")],
+        )
+
+    def test_an_extra_coordinate_inside_a_known_group_fails(self) -> None:
+        # Its metadata was never seeded, so the deploy numbered it from 1;
+        # published, it would roll back whatever Nexus serves for it
+        self.fetch_core()
+        self.redeploy_core()
+        self.deploy_extra()
+        before = sorted(self.m2repo.rglob("*"))
+        with self.assertRaises(ActionError) as caught:
+            _ = prune_metadata(self.m2repo, self.baseline)
+        message = str(caught.exception)
+        self.assertIn("org.example:extra:1.0.0-SNAPSHOT", message)
+        self.assertIn(f"{GROUP}/extra/maven-metadata.xml", message)
+        self.assertIn("buildNumber", message)
+        self.assertNotIn("org.example:core", message)
+        self.assertNotIn(f"{CORE}/", message)
+        # Refused before prune removed anything
+        self.assertEqual(sorted(self.m2repo.rglob("*")), before)
+
+    def test_attached_artefacts_of_a_recorded_module_pass(self) -> None:
+        self.fetch_core()
+        self.redeploy_core()
+        _ = self.write(self.m2repo, f"{CORE}/maven-metadata.xml", b"<metadata/>\n")
+        stem = f"{CORE_V}/core-1.0.0-20260925.120000-42"
+        for suffix in (
+            ".jar",
+            "-sources.jar",
+            "-javadoc.jar",
+            "-tests.jar",
+            ".pom",
+            ".module",
+            ".jar.asc",
+            ".jar.sha1",
+            ".pom.md5",
+        ):
+            _ = self.write(self.m2repo, f"{stem}{suffix}", b"x")
+        result = prune_metadata(self.m2repo, self.baseline)
+        self.assertEqual(result.kept, 2)
+
+    def test_a_recorded_plugins_group_index_passes(self) -> None:
+        _ = self.seed([coordinate("tool", "maven-plugin")])
+        version = f"{GROUP}/tool/1.0.0-SNAPSHOT"
+        _ = self.write(
+            self.m2repo, f"{version}/tool-1.0.0-20260925.120000-1.jar", b"jar"
+        )
+        _ = self.write(self.m2repo, f"{version}/maven-metadata.xml", metadata(1))
+        for index in (f"{GROUP}/tool", GROUP):
+            _ = self.write(
+                self.m2repo, f"{index}/maven-metadata.xml", ARTIFACT_METADATA
+            )
+        result = prune_metadata(self.m2repo, self.baseline)
+        self.assertEqual(result.kept, 3)
+
+    def test_a_group_index_no_recorded_plugin_owns_fails(self) -> None:
+        self.fetch_core()
+        _ = self.write(self.m2repo, f"{GROUP}/maven-metadata.xml", ARTIFACT_METADATA)
+        with self.assertRaisesRegex(ActionError, f"{GROUP}/maven-metadata.xml"):
+            _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_a_baseline_without_a_coordinates_record_fails(self) -> None:
+        self.fetch_core()
+        (self.baseline / COORDINATES_RECORD).unlink()
+        with self.assertRaisesRegex(ActionError, "no record of the reactor"):
+            _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_a_malformed_coordinates_record_fails(self) -> None:
+        self.fetch_core()
+        path = self.baseline / COORDINATES_RECORD
+        traversal = {**record(), "artifactId": ".."}
+        for content in (
+            "not json",
+            json.dumps(record()),
+            json.dumps([["org.example", "core"]]),
+            json.dumps([{"groupId": "org.example"}]),
+            json.dumps([{**record(), "version": 1}]),
+            json.dumps([{**record(), "classifier": "tests"}]),
+            json.dumps([traversal]),
+        ):
+            _ = path.write_text(content, encoding="utf-8")
+            with self.assertRaisesRegex(
+                ActionError, "not a valid coordinates record", msg=content
+            ):
+                _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_recorded_names_ending_in_snapshot_pass(self) -> None:
+        # Discovery accepts both, so only the record can tell a recorded
+        # group or artifact directory from a version directory
+        for module in (
+            Coordinate("org.example", "core-SNAPSHOT", "1.0.0-SNAPSHOT", "jar"),
+            Coordinate("org-SNAPSHOT", "core", "1.0.0-SNAPSHOT", "jar"),
+        ):
+            with self.subTest(module=module):
+                shutil.rmtree(self.m2repo, ignore_errors=True)
+                _ = self.seed([module])
+                artifact = f"{module.group_path}/{module.artifact_id}"
+                version = f"{artifact}/{module.version}"
+                _ = self.write(
+                    self.m2repo, f"{version}/x-1.0.0-20260925.120000-1.jar", b"jar"
+                )
+                _ = self.write(
+                    self.m2repo, f"{version}/maven-metadata.xml", metadata(1)
+                )
+                _ = self.write(
+                    self.m2repo, f"{artifact}/maven-metadata.xml", ARTIFACT_METADATA
+                )
+                result = prune_metadata(self.m2repo, self.baseline)
+                self.assertEqual(result.kept, 2)
+
+    def test_a_version_directory_colliding_with_a_recorded_artifact_fails(
+        self,
+    ) -> None:
+        # Maven's layout puts org:foo:bar-SNAPSHOT where org.foo:bar-SNAPSHOT
+        # keeps its artifact-level metadata, so the directory's name alone
+        # cannot clear it; the version files inside give it away
+        _ = self.seed(
+            [
+                Coordinate("org", "foo", "1-SNAPSHOT", "jar"),
+                Coordinate("org.foo", "bar-SNAPSHOT", "1-SNAPSHOT", "jar"),
+            ]
+        )
+        shared = "org/foo/bar-SNAPSHOT"
+        _ = self.write(self.m2repo, f"{shared}/maven-metadata.xml", ARTIFACT_METADATA)
+        _ = self.write(self.m2repo, f"{shared}/maven-metadata.xml.sha1", b"x")
+        _ = self.write(self.m2repo, f"{shared}/1-SNAPSHOT/bar-1-1.jar", b"jar")
+        _ = prune_metadata(self.m2repo, self.baseline)
+        _ = self.write(self.m2repo, f"{shared}/foo-bar-20260925.120000-1.jar", b"jar")
+        with self.assertRaisesRegex(ActionError, "SNAPSHOT org:foo:bar-SNAPSHOT"):
+            _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_a_release_sharing_recorded_metadata_fails(self) -> None:
+        # One path, two roles: a recorded SNAPSHOT's version metadata, or
+        # a recorded plugin's group index, is also the artifact metadata
+        # of an unrecorded release beneath it, which its deploy rewrites
+        for recorded, release, named in (
+            (
+                Coordinate("org", "foo", "bar-SNAPSHOT", "jar"),
+                "org/foo/bar-SNAPSHOT/1.0",
+                "version org.foo:bar-SNAPSHOT:1.0",
+            ),
+            (
+                Coordinate("org.foo", "tool", "1-SNAPSHOT", "maven-plugin"),
+                "org/foo/1.0",
+                "version org:foo:1.0",
+            ),
+        ):
+            with self.subTest(release=release):
+                shutil.rmtree(self.m2repo, ignore_errors=True)
+                _ = self.seed([recorded])
+                shared = release.rsplit("/", 1)[0]
+                _ = self.write(self.m2repo, f"{release}/x-1.0.jar", b"jar")
+                _ = self.write(
+                    self.m2repo, f"{shared}/maven-metadata.xml", ARTIFACT_METADATA
+                )
+                with self.assertRaisesRegex(ActionError, f"{re.escape(named)}[,.] "):
+                    _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_a_recorded_release_beneath_its_metadata_passes(self) -> None:
+        _ = self.seed([Coordinate("org.example", "lib", "1.0.0", "jar")])
+        _ = self.write(self.m2repo, f"{GROUP}/lib/1.0.0/lib-1.0.0.jar", b"jar")
+        _ = self.write(
+            self.m2repo, f"{GROUP}/lib/maven-metadata.xml", ARTIFACT_METADATA
+        )
+        result = prune_metadata(self.m2repo, self.baseline)
+        self.assertEqual(result.kept, 1)
+
+    def test_an_orphaned_metadata_sidecar_no_module_owns_fails(self) -> None:
+        # Without its XML, a checksum or signature would still publish
+        # over the server's own, so it is judged like the metadata
+        self.fetch_core()
+        orphan = f"{GROUP}/extra/maven-metadata.xml"
+        for suffix in (".sha1", ".asc"):
+            _ = self.write(self.m2repo, f"{orphan}{suffix}", b"x")
+        with self.assertRaisesRegex(ActionError, f"metadata {orphan}\\.asc[,.] "):
+            _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_unrecorded_names_ending_in_snapshot_name_their_coordinate(
+        self,
+    ) -> None:
+        # The name alone does not make a version directory, so the scan
+        # reaches the real version and names it, not a group or artifact
+        self.fetch_core()
+        for version in (
+            "org/foo-SNAPSHOT/extra/1-SNAPSHOT",
+            f"{GROUP}/extra-SNAPSHOT/1-SNAPSHOT",
+        ):
+            artifact = version.rsplit("/", 1)[0]
+            _ = self.write(self.m2repo, f"{version}/x-1-20260925.120000-1.jar", b"jar")
+            _ = self.write(self.m2repo, f"{version}/maven-metadata.xml", metadata(1))
+            _ = self.write(
+                self.m2repo, f"{artifact}/maven-metadata.xml", ARTIFACT_METADATA
+            )
+        with self.assertRaises(ActionError) as caught:
+            _ = prune_metadata(self.m2repo, self.baseline)
+        message = str(caught.exception)
+        for named in (
+            "SNAPSHOT org.foo-SNAPSHOT:extra:1-SNAPSHOT",
+            "metadata org/foo-SNAPSHOT/extra/maven-metadata.xml",
+            "SNAPSHOT org.example:extra-SNAPSHOT:1-SNAPSHOT",
+            f"metadata {GROUP}/extra-SNAPSHOT/maven-metadata.xml",
+        ):
+            self.assertRegex(message, f"{re.escape(named)}[,.] ")
+        self.assertNotRegex(message, r"SNAPSHOT org/foo-SNAPSHOT[,.] ")
+        self.assertNotIn("SNAPSHOT org:example:extra-SNAPSHOT", message)
+
+    def test_a_linked_recorded_container_is_not_entered(self) -> None:
+        # It would hold a version's files only beyond the link, outside
+        # the m2repo, where the scan must not look
+        _ = self.seed([Coordinate("org.example", "core-SNAPSHOT", "1-SNAPSHOT", "jar")])
+        outside = self.tmp / "outside"
+        _ = self.write(outside, "core-SNAPSHOT-1-20260925.120000-1.jar", b"jar")
+        (self.m2repo / GROUP).mkdir(parents=True)
+        (self.m2repo / GROUP / "core-SNAPSHOT").symlink_to(outside)
+        result = prune_metadata(self.m2repo, self.baseline)
+        self.assertEqual(result.removed, [])
+
+    def test_an_unrecorded_linked_snapshot_directory_is_reported(self) -> None:
+        # Not entered, so its contents cannot clear it
+        self.fetch_core()
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.m2repo / GROUP / "other-SNAPSHOT").symlink_to(outside)
+        with self.assertRaisesRegex(ActionError, "SNAPSHOT org:example:other-SNAPSHOT"):
+            _ = prune_metadata(self.m2repo, self.baseline)
+
+    def test_a_version_directory_too_shallow_for_a_coordinate_fails(self) -> None:
+        # Named by its path, since it holds no group or no artifact
+        self.fetch_core()
+        _ = self.write(self.m2repo, "stray-SNAPSHOT/x.jar", b"jar")
+        _ = self.write(self.m2repo, "org/x-SNAPSHOT/x.jar", b"jar")
+        with self.assertRaises(ActionError) as caught:
+            _ = prune_metadata(self.m2repo, self.baseline)
+        message = str(caught.exception)
+        self.assertRegex(message, r"SNAPSHOT stray-SNAPSHOT[,.] ")
+        self.assertRegex(message, r"SNAPSHOT org/x-SNAPSHOT[,.] ")
+
 
 class TestOutputHandling(TempTestCase):
     def test_error_text_cannot_start_a_workflow_command(self) -> None:
@@ -1286,7 +1573,7 @@ class TestOutputHandling(TempTestCase):
         self.assertNotIn(delimiter, "org/example\nforged=1")
 
 
-class TestEntryPoint(TempTestCase):
+class TestEntryPoint(FakeMavenTestCase):
     """cli.main() turns bad input into an annotation, never a traceback."""
 
     def run_main(self, **inputs: str) -> tuple[int, str]:
@@ -1367,6 +1654,35 @@ class TestEntryPoint(TempTestCase):
     def test_an_unknown_mode_is_an_error(self) -> None:
         self.assert_clean_error("mode must be", mode="publish")
 
+    def test_check_coordinates_takes_true_or_false(self) -> None:
+        _ = self.complete_fetch()
+        self.assert_clean_error(
+            "check_coordinates must be", mode="prune", check_coordinates="yes"
+        )
+
+    def test_prune_refuses_a_coordinate_fetch_did_not_record(self) -> None:
+        nexus = MockNexus(root=self.tmp / "server").start()
+        self.addCleanup(nexus.stop)
+        _ = self.fake_mvn(print_listing("org.example:core:jar:1.0.0-SNAPSHOT"))
+        _ = self.write(self.tmp, "pom.xml", b"<project/>\n")
+        output = self.tmp / "github-output"
+        path = os.environ["PATH"]
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        os.environ["PATH"] = f"{self.tmp}{os.pathsep}{path}"
+        os.environ["GITHUB_OUTPUT"] = str(output)
+        self.addCleanup(os.environ.pop, "GITHUB_OUTPUT")
+        code, out = self.run_main(mode="fetch", nexus_server=nexus.url)
+        self.assertEqual(code, 0, out)
+        recorded = Path(read_outputs(output)["coordinates_path"])
+        self.assertEqual(read_json(recorded), [record()])
+        # The deploy wrote a module the reactor never listed
+        m2repo = self.tmp / "m2repo"
+        _ = self.write(m2repo, f"{CORE_V}/core-1.0.0-20260925.120000-1.jar", b"jar")
+        _ = self.write(m2repo, f"{EXTRA_V}/extra-1.0.0-20260925.120000-1.jar", b"jar")
+        self.assert_clean_error("org.example:extra:1.0.0-SNAPSHOT", mode="prune")
+        code, out = self.run_main(mode="prune", check_coordinates="false")
+        self.assertEqual(code, 0, out)
+
     @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of mode")
     def test_os_errors_become_annotations(self) -> None:
         # A seeded metadata file prune cannot read: a real PermissionError
@@ -1377,7 +1693,11 @@ class TestEntryPoint(TempTestCase):
         )
         seeded.chmod(0)
         self.addCleanup(seeded.chmod, 0o600)
-        self.assert_clean_error("PermissionError", mode="prune")
+        # fetch recorded no module, so the coordinate check would refuse
+        # core before prune reached the file; this test is about the file
+        self.assert_clean_error(
+            "PermissionError", mode="prune", check_coordinates="false"
+        )
 
 
 if __name__ == "__main__":

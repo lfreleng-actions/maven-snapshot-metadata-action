@@ -5,15 +5,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from snapshot_metadata import ActionError
-from snapshot_metadata.coordinates import METADATA, Coordinate
+from snapshot_metadata.coordinates import METADATA, Coordinate, from_record
 from snapshot_metadata.nexus import Fetcher
 
 # Seeded alongside each metadata file when the server holds them, with
@@ -29,6 +31,11 @@ PRUNED_SIBLINGS = (
     *(f".asc{suffix}" for suffix in DIGEST_SUFFIXES),
 )
 BASELINE_MARKER = ".maven-snapshot-metadata-baseline"
+# A metadata file and the sidecars that travel with it
+METADATA_FILES = frozenset({METADATA, *(METADATA + s for s in PRUNED_SIBLINGS)})
+# Beside the marker: every module fetch read, whose metadata it seeded
+COORDINATES_RECORD = ".maven-snapshot-metadata-coordinates.json"
+SNAPSHOT_SUFFIX = "-SNAPSHOT"
 
 
 def looks_like_metadata(body: bytes) -> bool:
@@ -167,7 +174,9 @@ def seed_metadata(
 
     The baseline marker goes in last, once every path has seeded, so an
     interrupted fetch leaves a baseline ``prune`` refuses. It names the
-    m2repo seeded, so ``prune`` also refuses to judge any other.
+    m2repo seeded, so ``prune`` also refuses to judge any other. Before
+    it goes the record of the modules read, COORDINATES_RECORD, which
+    ``prune`` checks the deploy against.
     """
     if m2repo.is_dir():
         _refuse_links(resolve_path(m2repo))
@@ -186,7 +195,12 @@ def seed_metadata(
     baseline.mkdir(parents=True)
     m2repo.mkdir(parents=True, exist_ok=True)
 
-    paths = sorted({p for c in coordinates for p in c.metadata_paths()})
+    modules = sorted(set(coordinates))
+    record = [c.record() for c in modules]
+    _ = (baseline / COORDINATES_RECORD).write_text(
+        json.dumps(record, indent=2) + "\n", encoding="utf-8"
+    )
+    paths = sorted({p for c in modules for p in c.metadata_paths()})
     seeded: list[str] = []
     files = 0
     for relative in paths:
@@ -233,12 +247,147 @@ class PruneResult:
     kept: int
 
 
-def prune_metadata(m2repo: Path, baseline: Path) -> PruneResult:
+def _read_record(baseline: Path) -> list[Coordinate]:
+    """The modules fetch recorded beside the baseline."""
+    path = baseline / COORDINATES_RECORD
+    if not path.is_file():
+        raise ActionError(
+            f"{baseline} holds no record of the reactor fetch read; run mode"
+            + " 'fetch' from the same release of this action as 'prune'"
+        )
+    invalid = f"{path} is not a valid coordinates record"
+    try:
+        entries = cast(object, json.loads(path.read_bytes()))
+    except ValueError as exc:
+        raise ActionError(f"{invalid}: {exc}") from exc
+    if not isinstance(entries, list):
+        raise ActionError(f"{invalid}: it is not a list")
+    try:
+        return [from_record(e) for e in cast("list[object]", entries)]
+    except ActionError as exc:
+        raise ActionError(f"{invalid}: {exc}") from exc
+
+
+def _find_unrecorded(m2repo: Path, coordinates: Iterable[Coordinate]) -> list[str]:
+    """What the m2repo would publish for modules fetch did not record.
+
+    A directory no recorded module deploys to is a version directory
+    once it holds a version's files, and is then reported as its
+    coordinate. Only two kinds are judged that way. One is any name
+    ending in -SNAPSHOT. The name alone is not enough, since groupIds
+    and artifactIds may end in -SNAPSHOT too, and Maven's layout can
+    put an unrecorded org:foo:bar-SNAPSHOT where a recorded
+    org.foo:bar-SNAPSHOT keeps its artifact-level metadata. The other
+    is any directory beneath metadata a recorded module deploys. One
+    path can be a recorded SNAPSHOT's version metadata, or a plugin's
+    group index, and also the artifact-level metadata of an unrecorded
+    release beneath it. Other release directories are not judged.
+
+    A reported version directory is not scanned further, unless
+    recorded modules lie beneath it. Any other directory is scanned as
+    a group or artifact. Metadata, or any of its checksums and
+    signatures, is reported by its path unless a recorded module
+    deploys it. Everything else in a recorded version directory passes:
+    attached artefacts, extensions, checksums and signatures alike.
+    Linked directories are listed, not entered, as in
+    ``_refuse_links``; a linked one that would be judged cannot be
+    inspected, so it is reported unless it is a recorded group or
+    artifact directory.
+    """
+    modules = list(coordinates)
+    containers = {
+        p for c in modules for p in _ancestors(f"{c.group_path}/{c.artifact_id}")
+    }
+    recorded_versions = {f"{c.group_path}/{c.artifact_id}/{c.version}" for c in modules}
+    seedable = {p for c in modules for p in c.metadata_paths()}
+    unknown: list[str] = []
+    if not m2repo.is_dir():
+        return unknown
+    for directory, dirs, files in os.walk(m2repo, onerror=_reraise):
+        dirs.sort()
+        here = Path(directory).relative_to(m2repo)
+        # Metadata here a recorded module owns would be rewritten as the
+        # artifact-level metadata of any version deployed beneath it
+        owned = (here / METADATA).as_posix() in seedable
+        for name in list(dirs):
+            relative = (here / name).as_posix()
+            snapshot = name.endswith(SNAPSHOT_SUFFIX)
+            if relative in recorded_versions or not (snapshot or owned):
+                continue
+            label = "SNAPSHOT" if snapshot else "version"
+            path = Path(directory, name)
+            recorded = relative in containers
+            if path.is_symlink():
+                if not recorded:
+                    unknown.append(f"{label} {_coordinate_of(relative)}")
+                continue
+            if _holds_version_files(path):
+                unknown.append(f"{label} {_coordinate_of(relative)}")
+                if not recorded:
+                    dirs.remove(name)
+        present = METADATA_FILES.intersection(files)
+        if present and (here / METADATA).as_posix() not in seedable:
+            # An orphaned checksum or signature would publish over the
+            # server's just the same, so it is named when the XML is gone
+            found = METADATA if METADATA in present else min(present)
+            unknown.append(f"metadata {(here / found).as_posix()}")
+    return unknown
+
+
+def _holds_version_files(directory: Path) -> bool:
+    """Whether a directory holds a version's files.
+
+    A group or artifact directory holds subdirectories, and metadata
+    with its checksums and signatures, and nothing else.
+    """
+    with os.scandir(directory) as entries:
+        return any(
+            not e.is_dir(follow_symlinks=False) and e.name not in METADATA_FILES
+            for e in entries
+        )
+
+
+def _ancestors(path: str) -> list[str]:
+    """``path`` and every directory above it, e.g. ``org``, ``org/x``."""
+    parts = path.split("/")
+    return ["/".join(parts[: end + 1]) for end in range(len(parts))]
+
+
+def _coordinate_of(version_path: str) -> str:
+    """``groupId:artifactId:version`` for a version directory's path.
+
+    A path too short to hold a group and an artifact is named as is.
+    """
+    parts = version_path.split("/")
+    if len(parts) < 3:
+        return version_path
+    *group, artifact, version = parts
+    return ":".join((".".join(group), artifact, version))
+
+
+def _refuse_unrecorded(m2repo: Path, baseline: Path) -> None:
+    unknown = _find_unrecorded(m2repo, _read_record(baseline))
+    if unknown:
+        raise ActionError(
+            f"{m2repo} holds what fetch did not record: {', '.join(unknown)}."
+            + " fetch seeded no published metadata for these, so publishing"
+            + " them would replace what Nexus serves: a SNAPSHOT's buildNumber"
+            + " restarts at 1, and a version list loses its history. Deploy"
+            + " only the reactor fetch read, or set check_coordinates to"
+            + " 'false' to accept that"
+        )
+
+
+def prune_metadata(
+    m2repo: Path, baseline: Path, check_coordinates: bool = True
+) -> PruneResult:
     """Delete m2repo metadata still byte-identical to the baseline.
 
     Only in the m2repo fetch seeded: anywhere else every baseline file
     would be missing, so all would count as pruned while the seeded
-    copies went on to publish.
+    copies went on to publish. With ``check_coordinates``, it first
+    refuses anything the deploy wrote for a module fetch did not
+    record, leaving the m2repo untouched.
     """
     marker = baseline / BASELINE_MARKER
     if not marker.is_file():
@@ -249,6 +398,8 @@ def prune_metadata(m2repo: Path, baseline: Path) -> PruneResult:
             f"{baseline} was fetched into {os.fsdecode(recorded).rstrip()},"
             + f" not {resolve_path(m2repo)}; give fetch and prune the same m2repo_path"
         )
+    if check_coordinates:
+        _refuse_unrecorded(m2repo, baseline)
     removed: list[str] = []
     removed_files = 0
     for seeded in sorted(baseline.rglob(METADATA)):

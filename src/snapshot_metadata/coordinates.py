@@ -11,6 +11,7 @@ import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from snapshot_metadata import ActionError
 from snapshot_metadata.maven_args import split_maven_args
@@ -70,6 +71,40 @@ class Coordinate:
             paths.append(f"{self.group_path}/{METADATA}")
         return paths
 
+    def record(self) -> dict[str, str]:
+        """This module as fetch records it, under Maven's field names."""
+        return {
+            "groupId": self.group_id,
+            "artifactId": self.artifact_id,
+            "version": self.version,
+            "packaging": self.packaging,
+        }
+
+
+# The keys of one module in fetch's coordinates record, in field order
+RECORD_FIELDS = ("groupId", "artifactId", "version", "packaging")
+
+
+def from_record(entry: object) -> Coordinate:
+    """Read one module back from fetch's record, checked as on discovery.
+
+    The record sits beside the baseline, where build code can reach it,
+    so a value that would not have passed discovery is refused here too.
+    """
+    if not isinstance(entry, dict):
+        raise ActionError("an entry is not an object")
+    values = cast("dict[object, object]", entry)
+    if sorted(values, key=str) != sorted(RECORD_FIELDS):
+        raise ActionError(f"an entry's keys are not {', '.join(RECORD_FIELDS)}")
+    fields = [values[name] for name in RECORD_FIELDS]
+    strings = [value for value in fields if isinstance(value, str)]
+    if len(strings) != len(fields):
+        raise ActionError("an entry holds a value that is not a string")
+    group_id, artifact_id, version, packaging = strings
+    coordinate = Coordinate(group_id, artifact_id, version, packaging)
+    _validate(coordinate)
+    return coordinate
+
 
 def _validate(coordinate: Coordinate) -> None:
     fields = {
@@ -126,10 +161,10 @@ ACTION_INPUT_PREFIX = "SNAPSHOT_METADATA_"
 ACTION_INPUT_VARIABLES = frozenset(
     ACTION_INPUT_PREFIX + name
     for name in (
-        "BASELINE_PATH", "FETCH_ATTEMPTS", "HELP_PLUGIN_VERSION",
-        "M2REPO_PATH", "MAVEN_ARGS", "MODE", "NEXUS_PASSWORD",
-        "NEXUS_SERVER", "NEXUS_USERNAME", "NEXUS_VERSION", "PATH_PREFIX",
-        "POM_FILE", "REPOSITORY_NAME", "RETRY_DELAY",
+        "BASELINE_PATH", "CHECK_COORDINATES", "FETCH_ATTEMPTS",
+        "HELP_PLUGIN_VERSION", "M2REPO_PATH", "MAVEN_ARGS", "MODE",
+        "NEXUS_PASSWORD", "NEXUS_SERVER", "NEXUS_USERNAME", "NEXUS_VERSION",
+        "PATH_PREFIX", "POM_FILE", "REPOSITORY_NAME", "RETRY_DELAY",
     )
 )  # fmt: skip
 

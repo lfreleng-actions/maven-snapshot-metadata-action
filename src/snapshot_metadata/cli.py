@@ -25,6 +25,7 @@ from snapshot_metadata.nexus import (
 )
 from snapshot_metadata.repository import (
     BASELINE_MARKER,
+    COORDINATES_RECORD,
     prune_metadata,
     resolve_path,
     seed_metadata,
@@ -46,6 +47,12 @@ def _int_input(name: str, value: str, low: int, high: int) -> int:
     if not re.fullmatch(r"[0-9]{1,3}", value) or not low <= int(value) <= high:
         raise ActionError(f"{name} must be an integer from {low} to {high}")
     return int(value)
+
+
+def _bool_input(name: str, value: str) -> bool:
+    if value not in {"true", "false"}:
+        raise ActionError(f"{name} must be 'true' or 'false'")
+    return value == "true"
 
 
 def _within(path: Path, root: Path, name: str) -> Path:
@@ -128,6 +135,7 @@ def run_fetch() -> None:
             "metadata_count": str(len(result.metadata)),
             "group_paths": " ".join(groups),
             "baseline_path": str(baseline),
+            "coordinates_path": str(baseline / COORDINATES_RECORD),
         }
     )
     write_summary(
@@ -146,8 +154,10 @@ def run_fetch() -> None:
 
 def run_prune() -> None:
     """Entry point for mode 'prune'."""
+    check = _bool_input("check_coordinates", _env("CHECK_COORDINATES", "true"))
     raw = _env("BASELINE_PATH")
-    result = prune_metadata(_m2repo(), Path(raw) if raw else default_baseline())
+    baseline = Path(raw) if raw else default_baseline()
+    result = prune_metadata(_m2repo(), baseline, check)
     emit(f"Metadata pruned: {len(result.removed)} ({result.removed_files} files)")
     for relative in result.removed:
         emit(f"  {relative}")
@@ -163,6 +173,7 @@ def run_prune() -> None:
             "| ---- | ----- |",
             f"| Unchanged metadata removed | {len(result.removed)} |",
             f"| Metadata left to publish | {result.kept} |",
+            f"| Coordinate check | {'on' if check else 'off'} |",
         ]
     )
 

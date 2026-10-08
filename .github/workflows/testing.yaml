@@ -221,6 +221,7 @@ jobs:
           MODULES: ${{ steps.fetch.outputs.module_count }}
           SEEDED: ${{ steps.fetch.outputs.metadata_count }}
           GROUP_PATHS: ${{ steps.fetch.outputs.group_paths }}
+          COORDINATES: ${{ steps.fetch.outputs.coordinates_path }}
         run: |
           set -euo pipefail
           status=0
@@ -233,6 +234,10 @@ jobs:
           check module_count "${MODULES}" 4
           check metadata_count "${SEEDED}" 2
           check group_paths "${GROUP_PATHS}" org/lfreleng/test
+          recorded="$(jq -r '[.[].artifactId] | join(" ")' "${COORDINATES}")"
+          modules="test-maven-app test-maven-core"
+          modules+=" test-maven-parent test-maven-project"
+          check coordinates_path "${recorded}" "${modules}"
           exit "${status}"
 
       # The same deploy maven-build-action performs, to the same path
@@ -279,6 +284,74 @@ jobs:
         run: |
           echo "::error::prune without a baseline succeeded"
           exit 1
+
+      # A POM can deploy more than the reactor lists. This fixture binds
+      # deploy-file to deploy, writing org.lfreleng.test:extra beside
+      # its own module; fetch never saw it, so seeded nothing for it,
+      # and prune must refuse it rather than let it publish from build 1.
+      - name: "Fetch for the deploy-file fixture"
+        uses: $/
+        with:
+          mode: "fetch"
+          nexus_server: ${{ steps.mock.outputs.url }}
+          repository_name: "snapshots"
+          path_prefix: "tests/fixtures/deploy-file"
+          m2repo_path: "m2repo-extra"
+
+      - name: "Deploy a coordinate fetch did not record"
+        shell: bash
+        working-directory: "tests/fixtures/deploy-file"
+        run: |
+          set -euo pipefail
+          url="file://${GITHUB_WORKSPACE}/m2repo-extra"
+          mvn -B --no-transfer-progress deploy \
+            "-DaltDeploymentRepository=snapshots::${url}" "-Dextra.url=${url}"
+
+      - name: "Prune the unrecorded coordinate (should fail)"
+        id: unrecorded
+        continue-on-error: true
+        uses: $/
+        with:
+          mode: "prune"
+          m2repo_path: "m2repo-extra"
+
+      - name: "Error if the step above did NOT fail"
+        if: steps.unrecorded.outcome == 'success'
+        shell: bash
+        run: |
+          echo "::error::prune accepted a coordinate fetch did not record"
+          exit 1
+
+      # The step above failed before touching the m2repo, so the same
+      # prune, run directly, shows what it said: the extra coordinate,
+      # and not the module fetch recorded
+      - name: "Check prune named the unrecorded coordinate"
+        shell: bash
+        env:
+          SNAPSHOT_METADATA_MODE: "prune"
+          SNAPSHOT_METADATA_M2REPO_PATH: "m2repo-extra"
+        run: |
+          set -euo pipefail
+          if said="$(python3 -E -s src/main.py)"; then
+            echo "::error::prune accepted a coordinate fetch did not record"
+            exit 1
+          fi
+          status=0
+          for want in "SNAPSHOT org.lfreleng.test:extra:1.0.0-SNAPSHOT" \
+            "metadata org/lfreleng/test/extra/maven-metadata.xml"; do
+            if ! grep -qF -- "${want}" <<< "${said}"; then
+              echo "::error::prune did not name '${want}'"
+              status=1
+            fi
+          done
+          if grep -qF -- "deploy-file-fixture" <<< "${said}"; then
+            echo "::error::prune refused the module fetch recorded"
+            status=1
+          fi
+          if [ "${status}" != 0 ]; then
+            printf 'prune said: %s\n' "${said}"
+          fi
+          exit "${status}"
 
       # Reactor discovery on this Maven, where the help plugin's own
       # parameters and property-activated profiles meet a real build
