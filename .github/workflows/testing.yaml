@@ -84,11 +84,25 @@ jobs:
           fi
           "${PYTHON}" -m unittest discover -s tests -t . -v
 
+  # The Maven releases and Java versions the Java/Maven estate tests
+  # against, published by java-workflows for every repository in it.
+  versions:
+    name: "Java/Maven versions"
+    permissions: {}
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/java-workflows/.github/workflows/java-maven-versions.yaml@c0a33e2ec6357244055df8b32aaf78d94e2b9514  # main
+
   # Proves the premise the action exists for, on a real Maven deploy:
   # with published metadata seeded at buildNumber 41, the deploy
   # continues at 42, and prune drops the module the build left alone.
+  # It runs on every Maven release and JDK under test: 3.9 is the floor
+  # fetch enforces, 3.10 moved to the resolver lineage Maven 4 uses,
+  # and 4 parses long options with partial matching and differs in
+  # ways the checks depend on.
   end-to-end:
-    name: "Fetch, deploy and prune (Maven ${{ matrix.maven }})"
+    # yamllint disable-line rule:line-length
+    name: "Fetch, deploy and prune (Maven ${{ matrix.maven.line }}, JDK ${{ matrix.java }})"
+    needs: versions
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -96,21 +110,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the floor fetch enforces; 4 parses long options with
-        # partial matching and differs in ways the checks depend on.
-        # Both are installed rather than taken from the runner image,
-        # whose Maven moves on without notice. Each digest is pinned
-        # rather than fetched beside the tarball, where it would prove
-        # only that the download completed, and matches Apache's dist.
-        include:
-          - maven: "3.9"
-            version: "3.9.16"
-            # yamllint disable-line rule:line-length
-            sha512: "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6"
-          - maven: "4"
-            version: "4.0.0-rc-7"
-            # yamllint disable-line rule:line-length
-            sha512: "17b886c0ffb7ec225e514afa8179b3143d855d196cfbb4607ece6272a9b4f51501a389438ab6841b393a4b1391a1b714f07f450daba1951f53f732b400338184"
+        # Maven is installed below rather than taken from the runner
+        # image, whose Maven moves on without notice. Each entry
+        # carries the archive's digest, pinned where the versions are
+        # published rather than fetched beside the tarball, where it
+        # would prove only that the download completed.
+        maven: ${{ fromJSON(needs.versions.outputs.maven) }}
+        java: ${{ fromJSON(needs.versions.outputs.java) }}
     steps:
       # yamllint disable-line rule:line-length
       - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
@@ -138,18 +144,18 @@ jobs:
           path: "fixture"
           persist-credentials: false
 
-      - name: "Set up Java"
+      - name: "Set up Java ${{ matrix.java }}"
         # yamllint disable-line rule:line-length
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
         with:
           distribution: "temurin"
-          java-version: "17"
+          java-version: ${{ matrix.java }}
 
-      - name: "Install Maven ${{ matrix.version }}"
+      - name: "Install Maven ${{ matrix.maven.version }}"
         shell: bash
         env:
-          MAVEN_VERSION: ${{ matrix.version }}
-          MAVEN_SHA512: ${{ matrix.sha512 }}
+          MAVEN_VERSION: ${{ matrix.maven.version }}
+          MAVEN_SHA512: ${{ matrix.maven.sha512 }}
         run: |
           set -euo pipefail
           name="apache-maven-${MAVEN_VERSION}"
@@ -161,18 +167,29 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/${name}/bin" >> "${GITHUB_PATH}"
 
-      - name: "Check the Maven under test"
+      - name: "Check the toolchain under test"
         shell: bash
         env:
-          WANT: ${{ matrix.maven }}
+          WANT_MAVEN: ${{ matrix.maven.version }}
+          WANT_JAVA: ${{ matrix.java }}
         run: |
           set -euo pipefail
-          pattern='s/^Apache Maven \([0-9]*\)\.\([0-9]*\).*/\1.\2/p'
-          got="$(mvn -v | sed -n "${pattern}")"
-          case "${got}" in
-            "${WANT}"|"${WANT}".*) echo "Maven ${got}" ;;
-            *) echo "::error::running Maven ${got}, expected ${WANT}"; exit 1 ;;
+          version="$(mvn --version)"
+          echo "${version}"
+          status=0
+          if ! grep -qF "Apache Maven ${WANT_MAVEN} (" <<< "${version}"; then
+            echo "::error::mvn is not Maven ${WANT_MAVEN}"
+            status=1
+          fi
+          if ! grep -qE "^Java version: ${WANT_JAVA}[.,]" <<< "${version}"; then
+            echo "::error::Maven does not run on JDK ${WANT_JAVA}"
+            status=1
+          fi
+          case "${JAVA_HOME:-}" in
+            *Temurin*) ;;
+            *) echo "::error::JAVA_HOME is not a Temurin JDK"; status=1 ;;
           esac
+          exit "${status}"
 
       # Two modules already published at build 41. The deploy below
       # rebuilds core only, so app's copy is the one prune must drop.

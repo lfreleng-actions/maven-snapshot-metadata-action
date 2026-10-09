@@ -382,9 +382,12 @@ during the build.
 The workflow in `.github/workflows/testing.yaml` also runs the whole
 sequence on a real Maven deploy. It seeds `buildNumber` 41, deploys one
 module, then asserts the deploy continued at 42 and that `prune` dropped
-the untouched module's metadata. It runs on Maven 3.9, the oldest
-`fetch` accepts, and on Maven 4, each a pinned release it installs
-itself. It then deploys `tests/fixtures/deploy-file`, whose POM binds
+the untouched module's metadata. It runs on every Maven release and
+JDK the Java/Maven estate tests against, as published by
+[`java-workflows`](https://github.com/lfreleng-actions/java-workflows):
+Maven 3.9, the oldest `fetch` accepts, 3.10 and 4, each a pinned
+release it installs itself, on JDK 17 and 21 to 25. It then deploys
+`tests/fixtures/deploy-file`, whose POM binds
 `deploy-file` to `deploy` to write a coordinate the reactor never
 lists, and asserts that `prune` refuses it by name. The same job runs
 the suite's real-Maven tests,
