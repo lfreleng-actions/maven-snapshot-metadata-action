@@ -97,10 +97,12 @@ fi
 dirs=$(git -c core.quotePath=false ls-files -- "*/$manifest" | sed "s|/$manifest\$||" || true)
 
 # The first tracked source not sitting under one of those directories.
+# The list reaches awk through the environment: macOS awk refuses a
+# newline in a -v value, which two nested manifests produce.
 owned=""
 if [ -n "$sources" ]; then
-    owned=$(printf '%s\n' "$sources" | awk -v dirs="$dirs" '
-        BEGIN { n = split(dirs, d, "\n") }
+    owned=$(printf '%s\n' "$sources" | GUARD_DIRS=$dirs awk '
+        BEGIN { n = split(ENVIRON["GUARD_DIRS"], d, "\n") }
         {
             for (i = 1; i <= n; i++)
                 if (d[i] != "" && index($0, d[i] "/") == 1)

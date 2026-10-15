@@ -1,0 +1,65 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Tests the scripts the pre-commit hooks call. pre-commit.ci skips the
+# hooks that use them, so they otherwise run only on contributors'
+# machines, macOS among them, whose awk differs from Linux's.
+name: "Test hook scripts 🪝"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  manifest-guard:
+    name: "Test manifest-guard.sh (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # Harden-runner supports Linux runners only.
+      # Load the egress allow-list out-of-band from the
+      # organisation's .github repository and publish it as
+      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        if: runner.os == 'Linux'
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # Harden the runner with the just-loaded allow-list.
+      - name: 'Harden runner (block)'
+        if: runner.os == 'Linux'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Run the manifest-guard.sh tests"
+        shell: bash
+        run: |
+          # Run the manifest-guard.sh tests
+          sh .github/hooks/manifest-guard-test.sh
