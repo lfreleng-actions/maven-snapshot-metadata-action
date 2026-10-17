@@ -40,7 +40,7 @@ jobs:
         python: ["3.9", "3.12"]
     steps:
       # yamllint disable-line rule:line-length
-      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: '@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
@@ -119,7 +119,7 @@ jobs:
         java: ${{ fromJSON(needs.versions.outputs.java) }}
     steps:
       # yamllint disable-line rule:line-length
-      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: '@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
