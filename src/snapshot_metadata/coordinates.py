@@ -152,11 +152,11 @@ def parse_active_profiles(text: str) -> list[Coordinate]:
 
 
 # The environment variables action.yaml sets for this step: one per
-# declared input, under a prefix of the action's own. Only these leave
-# Maven's environment. A caller's job variables stay, INPUT_* ones
-# included, since a profile may activate on one and the deploy that
-# follows would still see it. A test keeps this list in step with
-# action.yaml.
+# declared input, and the interpreter setup-python resolved, all under
+# a prefix of the action's own. Only these leave Maven's environment.
+# A caller's job variables stay, INPUT_* and PYTHON included, since a
+# profile may activate on one and the deploy that follows would still
+# see it. A test keeps these in step with action.yaml.
 ACTION_INPUT_PREFIX = "SNAPSHOT_METADATA_"
 ACTION_INPUT_VARIABLES = frozenset(
     ACTION_INPUT_PREFIX + name
@@ -167,10 +167,12 @@ ACTION_INPUT_VARIABLES = frozenset(
         "PATH_PREFIX", "POM_FILE", "REPOSITORY_NAME", "RETRY_DELAY",
     )
 )  # fmt: skip
+ACTION_PYTHON_VARIABLE = ACTION_INPUT_PREFIX + "PYTHON"
+ACTION_VARIABLES = ACTION_INPUT_VARIABLES | {ACTION_PYTHON_VARIABLE}
 
 
 def maven_environment(environ: Mapping[str, str]) -> dict[str, str]:
-    """The environment for Maven: the caller's, minus this action's inputs.
+    """The environment for Maven: the caller's, minus this action's own.
 
     The inputs include the Nexus password, which Maven does not need.
     Project extensions and plugins run inside Maven and can read its
@@ -184,7 +186,7 @@ def maven_environment(environ: Mapping[str, str]) -> dict[str, str]:
     return {
         k: v
         for k, v in environ.items()
-        if k not in ACTION_INPUT_VARIABLES and k != "MAVEN_ARGS"
+        if k not in ACTION_VARIABLES and k != "MAVEN_ARGS"
     }
 
 

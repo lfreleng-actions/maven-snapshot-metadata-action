@@ -28,6 +28,8 @@ from snapshot_metadata import ActionError, cli
 from snapshot_metadata.coordinates import (
     ACTION_INPUT_PREFIX,
     ACTION_INPUT_VARIABLES,
+    ACTION_PYTHON_VARIABLE,
+    ACTION_VARIABLES,
     HELP_PLUGIN,
     Coordinate,
     discover_coordinates,
@@ -620,8 +622,18 @@ class TestDiscoverCoordinates(FakeMavenTestCase):
         env = maven_environment({**caller, f"{ACTION_INPUT_PREFIX}MODE": "fetch"})
         self.assertEqual(env, caller)
 
+    def test_a_callers_python_reaches_maven_and_the_actions_does_not(
+        self,
+    ) -> None:
+        # A profile may activate on env.PYTHON as well; the interpreter
+        # this action runs on is its own and stays out of Maven
+        caller = {"PYTHON": "/caller/python", "PYTHONPATH": "/caller/lib"}
+        env = maven_environment({**caller, ACTION_PYTHON_VARIABLE: "/ours"})
+        self.assertEqual(env, caller)
+
     def test_the_stripped_variables_match_action_yaml(self) -> None:
-        # One variable per declared input, all set by the step's env
+        # One variable per declared input, all set by the step's env,
+        # beside the interpreter path
         text = (
             pathlib.Path(__file__).resolve().parent.parent / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -630,8 +642,11 @@ class TestDiscoverCoordinates(FakeMavenTestCase):
         declared = {f"{ACTION_INPUT_PREFIX}{name.upper()}" for name in names}
         found: list[str] = re.findall(r"^\s+([A-Z][A-Z0-9_]*):", text, re.M)
         exported = set(found)
-        self.assertEqual(declared, exported)
-        self.assertEqual(set(ACTION_INPUT_VARIABLES), exported)
+        self.assertEqual(set(ACTION_VARIABLES), exported)
+        self.assertEqual(set(ACTION_INPUT_VARIABLES), declared)
+        self.assertEqual(
+            ACTION_VARIABLES - ACTION_INPUT_VARIABLES, {ACTION_PYTHON_VARIABLE}
+        )
 
     def test_missing_maven_is_reported(self) -> None:
         with self.assertRaisesRegex(ActionError, "not found on PATH"):

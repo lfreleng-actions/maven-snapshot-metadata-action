@@ -331,16 +331,21 @@ publish step can cover artefacts outside the root `groupId` too.
 
 ## Requirements
 
-- Python 3.9 or newer as `python3`; GitHub-hosted runners ship 3.12.
-  The action needs nothing beyond the standard library, and checks the
-  version before it starts.
+- Nothing Python-specific from the caller. The action sets up its own
+  Python 3.12 with a pinned `actions/setup-python`, without changing
+  the caller's `PATH` or the `PYTHON` variable Maven sees, and runs
+  that interpreter rather than whichever `python3` the runner
+  provides. It needs nothing beyond the standard library; the code
+  itself supports Python 3.9 or newer.
 - For `fetch`, Maven 3.9 or newer as `mvn` on `PATH`, and a JDK the
   project builds with. GitHub-hosted runners ship a recent Maven;
   `actions/setup-java` provides the JDK. `fetch` refuses older Maven:
   its launcher ignores `MAVEN_ARGS`, so the deploy could build a reactor
   other than the one `fetch` seeded.
 - Egress to the Nexus server, and to whatever repositories Maven needs
-  to resolve the project's parent POMs.
+  to resolve the project's parent POMs. Where the runner's tool cache
+  lacks Python 3.12, also egress to GitHub, from which
+  `actions/setup-python` downloads it.
 
 The baseline lives under `$RUNNER_TEMP`, outside the workspace, so
 workspace cleanup, `git clean` and artefact uploads of the workspace

@@ -113,10 +113,25 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # The action brings its own interpreter rather than taking
+    # whichever python3 the caller's PATH resolves first.
+    # update-environment: false leaves the caller's PATH and Python
+    # variables as they were, so later steps see no change. The path
+    # it resolves reaches the next step under the action's own prefix,
+    # never as PYTHON, and leaves Maven's environment with the inputs.
+    - name: "Set up Python"
+      id: python
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+      with:
+        python-version: "3.12"
+        update-environment: false
+
     - name: "SNAPSHOT metadata"
       id: run
       shell: bash
       env:
+        SNAPSHOT_METADATA_PYTHON: ${{ steps.python.outputs.python-path }}
         SNAPSHOT_METADATA_MODE: ${{ inputs.mode }}
         SNAPSHOT_METADATA_NEXUS_SERVER: ${{ inputs.nexus_server }}
         SNAPSHOT_METADATA_REPOSITORY_NAME: ${{ inputs.repository_name }}
@@ -135,20 +150,8 @@ runs:
       run: |
         # SNAPSHOT metadata
         set -euo pipefail
-        if ! command -v python3 > /dev/null; then
-          echo "::error::This action needs python3 on the runner"
-          exit 1
-        fi
-        # Checked before the package is imported, since an older
-        # interpreter fails at import with a traceback, not an error
-        if ! python3 -E -s -c 'import sys; sys.exit(sys.version_info < (3, 9))'
-        then
-          echo "::error::This action needs Python 3.9 or newer;" \
-            "python3 is $(python3 -V 2>&1)"
-          exit 1
-        fi
         # -E ignores PYTHON* variables and -s the user site directory,
         # so neither the caller's environment nor the checkout can put
         # other modules ahead of the standard library. main.py is run
         # as a script, not with -m, for the reason it documents.
-        python3 -E -s "${GITHUB_ACTION_PATH}/src/main.py"
+        "${SNAPSHOT_METADATA_PYTHON}" -E -s "${GITHUB_ACTION_PATH}/src/main.py"
