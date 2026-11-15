@@ -335,8 +335,8 @@ publish step can cover artefacts outside the root `groupId` too.
   Python 3.12 with a pinned `actions/setup-python`, without changing
   the caller's `PATH` or the `PYTHON` variable Maven sees, and runs
   that interpreter rather than whichever `python3` the runner
-  provides. It needs nothing beyond the standard library; the code
-  itself supports Python 3.9 or newer.
+  provides. It needs nothing beyond the standard library. The code
+  and its tests need Python 3.11 or newer.
 - For `fetch`, Maven 3.9 or newer as `mvn` on `PATH`, and a JDK the
   project builds with. GitHub-hosted runners ship a recent Maven;
   `actions/setup-java` provides the JDK. `fetch` refuses older Maven:

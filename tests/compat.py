@@ -7,7 +7,7 @@ than 3.12, such as a contributor's local one, gets a stand-in that
 returns the method unchanged.
 
 The checkers take it from ``typing_extensions``, whose stubs they
-bundle, so it resolves when they target the 3.9 floor. That import is
+bundle, so it resolves when they target the 3.11 floor. That import is
 never executed, so nothing needs installing.
 """
 

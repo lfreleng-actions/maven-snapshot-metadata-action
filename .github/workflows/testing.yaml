@@ -26,8 +26,8 @@ env:
   FIXTURE_GROUP: "org.lfreleng.test"
 
 jobs:
-  # The floor the action enforces and the runner's default, so the
-  # suite runs on the oldest interpreter it claims to support.
+  # The oldest Python the code supports, and the one the action pins,
+  # so the suite runs on both ends of the range it claims to support.
   unit-tests:
     name: "Unit tests (Python ${{ matrix.python }})"
     runs-on: ubuntu-latest
@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.12"]
+        python: ["3.11", "3.12"]
     steps:
       # yamllint disable-line rule:line-length
       - uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3

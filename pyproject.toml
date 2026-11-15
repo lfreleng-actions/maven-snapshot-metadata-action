@@ -6,9 +6,9 @@
 # installs it.
 
 [tool.basedpyright]
-# The floor action.yaml enforces, and the oldest interpreter the
-# unit-test matrix runs.
-pythonVersion = "3.9"
+# The oldest Python the code supports, and the oldest interpreter
+# the unit-test matrix runs. action.yaml pins its own, newer one.
+pythonVersion = "3.11"
 pythonPlatform = "All"
 # basedpyright's own default, kept explicit. The code already passes
 # it, and it is stricter than the organisation's "standard" baseline.
