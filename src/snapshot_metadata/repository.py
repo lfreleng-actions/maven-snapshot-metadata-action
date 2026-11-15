@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 """Seeding and pruning metadata in the local deploy repository."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import os

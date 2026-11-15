@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 """The maven_args allow-list, applied to maven_args and MAVEN_ARGS."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 
 from snapshot_metadata import ActionError

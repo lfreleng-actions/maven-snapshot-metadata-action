@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 """Entry points: read the action's inputs and run a mode."""
 
-from __future__ import annotations
-
 import os
 import re
 import tempfile

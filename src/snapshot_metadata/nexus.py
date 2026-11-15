@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 """Read-only access to a Nexus 2 or Nexus 3 Maven repository."""
 
-from __future__ import annotations
-
 import base64
 import http.client
 import re

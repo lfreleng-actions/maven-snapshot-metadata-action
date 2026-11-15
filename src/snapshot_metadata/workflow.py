@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 """GitHub Actions plumbing: logging, outputs and summaries."""
 
-from __future__ import annotations
-
 import os
 import secrets
 import sys
