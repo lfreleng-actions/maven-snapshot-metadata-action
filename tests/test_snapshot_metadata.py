@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 """Tests for the src/snapshot_metadata package, against a mock Nexus."""
 
-from __future__ import annotations
-
 import contextlib
 import hashlib
 import http.client

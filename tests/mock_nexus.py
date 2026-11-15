@@ -22,8 +22,6 @@ Run as a script, it serves ``MOCK_ROOT`` and writes its port to
 ``MOCK_PORT_FILE``, which is how the end-to-end workflow uses it.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import threading
@@ -31,7 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import final
+from typing import Self, final
 
 if __package__ in {None, ""}:
     # Run as a script (the end-to-end workflow does): make the
@@ -93,7 +91,7 @@ class MockNexus:
                     return target
         return None
 
-    def start(self) -> MockNexus:
+    def start(self) -> Self:
         """Start serving in a daemon thread."""
         mock = self
 
