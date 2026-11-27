@@ -90,7 +90,7 @@ jobs:
     name: "Java/Maven versions"
     permissions: {}
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/java-workflows/.github/workflows/java-maven-versions.yaml@535e49d8407dc4dbca224c8f389716208fbee155  # v0.8.1
+    uses: lfreleng-actions/java-workflows/.github/workflows/java-maven-versions.yaml@7ad325b5bf20482ccbec7fa2f916d5087ce92147  # v0.8.2
 
   # Proves the premise the action exists for, on a real Maven deploy:
   # with published metadata seeded at buildNumber 41, the deploy
